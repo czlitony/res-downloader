@@ -5,12 +5,12 @@ go 1.22.0
 toolchain go1.23.2
 
 require (
+	github.com/abema/go-mp4 v1.4.1
 	github.com/elazarl/goproxy v1.7.2
 	github.com/matoous/go-nanoid/v2 v2.1.0
 	github.com/rs/zerolog v1.33.0
 	github.com/vrischmann/userdir v0.0.0-20151206171402-20f291cebd68
 	github.com/wailsapp/wails/v2 v2.11.0
-	github.com/yapingcat/gomedia v0.0.0-20240906162731-17feea57090c
 	golang.org/x/net v0.35.0
 	golang.org/x/sys v0.30.0
 )

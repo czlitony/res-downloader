@@ -1061,26 +1061,38 @@ let activeCaptions = 0
 const maxConcurrentCaptions = 5
 
 const processOneCaptionTask = async (row: appType.MediaInfo, index: number) => {
-  const item = data.value[index]
-  if (!item || item.Id !== row.Id) return
+  // 根据 Id 查找实际 index（避免列表刷新导致 index 对不上）
+  const realIndex = data.value.findIndex(item => item.Id === row.Id)
+  if (realIndex === -1) {
+    console.warn('提取文案: 找不到项目', row.Id)
+    return
+  }
+  const item = data.value[realIndex]
 
   item.Status = 'extracting'
   try {
     const res: appType.Res = await appApi.extractCaption(item)
-    if (res.code !== 0 && res.data?.text?.trim()) {
+    // 后端成功返回 code=1，失败返回 code=0
+    if (res.code === 1) {
       item.Status = 'extract_done'
-      const txtPath = res.data.txt_path || ''
+      const txtPath = res.data?.txt_path || ''
       item.CaptionPath = txtPath
       if (txtPath) {
         window?.$message?.success(t("index.extract_caption_saved") + `: ${txtPath}`)
+      } else {
+        window?.$message?.success(t("index.extract_caption_saved"))
       }
     } else {
       item.Status = 'extract_error'
-      window?.$message?.error(`${item.Domain}: ${res.message || t("index.extract_caption_error")}`)
+      const errMsg = res.message || t("index.extract_caption_error")
+      window?.$message?.error(`${item.Domain || '提取文案'}: ${errMsg}`)
+      console.error('提取文案失败:', errMsg, res)
     }
-  } catch (err) {
+  } catch (err: any) {
     item.Status = 'extract_error'
-    window?.$message?.error(`${item.Domain}: ${t("index.extract_caption_error")}`)
+    const errMsg = err?.message || t("index.extract_caption_error")
+    window?.$message?.error(`${item.Domain || '提取文案'}: ${errMsg}`)
+    console.error('提取文案异常:', err)
   }
   cacheData()
 

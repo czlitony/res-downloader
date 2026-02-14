@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	mp4 "github.com/yapingcat/gomedia/go-mp4"
+	gomp4 "github.com/abema/go-mp4"
 )
 
 const (
@@ -111,7 +111,88 @@ func (asr *BcutASR) Run() (string, error) {
 	return text, nil
 }
 
+// audioCodecType 音频编解码类型
+type audioCodecType int
+
+const (
+	audioCodecAAC audioCodecType = iota
+	audioCodecMP3
+	audioCodecHEAAC // HE-AAC (SBR) - B站ASR不支持
+	audioCodecUnknown
+)
+
+// detectAudioCodec 检测MP4中音频轨道的编解码类型
+// 返回: (编解码类型, AAC profile用于ADTS头, 编解码名称)
+// 注意: ADTS profile 只有 2 位 (0=Main, 1=LC, 2=SSR, 3=LTP)
+func detectAudioCodec(mp4aInfo *gomp4.MP4AInfo) (audioCodecType, uint8, string) {
+	if mp4aInfo == nil {
+		return audioCodecAAC, 1, "aac (默认LC)"
+	}
+
+	// Object Type Indication (OTI) 标准值:
+	// 0x40 = MPEG-4 Audio (AAC)
+	// 0x66 = MPEG-2 AAC Main
+	// 0x67 = MPEG-2 AAC LC
+	// 0x68 = MPEG-2 AAC SSR
+	// 0x69 = MPEG-2 Audio Layer III (MP3)
+	// 0x6B = MPEG-1 Audio Layer III (MP3)
+	oti := mp4aInfo.OTI
+
+	switch oti {
+	case 0x6B: // MPEG-1 Audio Layer III
+		return audioCodecMP3, 0, "mp3 (MPEG-1 Layer III)"
+	case 0x69: // MPEG-2 Audio Layer III
+		return audioCodecMP3, 0, "mp3 (MPEG-2 Layer III)"
+	case 0x66: // MPEG-2 AAC Main
+		return audioCodecAAC, 0, "aac (MPEG-2 Main)"
+	case 0x67: // MPEG-2 AAC LC
+		return audioCodecAAC, 1, "aac (MPEG-2 LC)"
+	case 0x68: // MPEG-2 AAC SSR
+		return audioCodecAAC, 2, "aac (MPEG-2 SSR)"
+	case 0x40: // MPEG-4 Audio (最常见的AAC)
+		// AudOTI = Audio Object Type
+		// 1=Main, 2=LC, 3=SSR, 4=LTP, 5=SBR(HE-AAC), 29=PS(HE-AACv2)
+		// ADTS profile = AudOTI - 1, 但只有 2 位
+		audOTI := mp4aInfo.AudOTI
+		var profile uint8 = 1 // 默认 LC
+		profileName := "LC"
+
+		switch audOTI {
+		case 1:
+			profile = 0
+			profileName = "Main"
+		case 2:
+			profile = 1
+			profileName = "LC"
+		case 3:
+			profile = 2
+			profileName = "SSR"
+		case 4:
+			profile = 3
+			profileName = "LTP"
+		case 5:
+			// HE-AAC (SBR) - B站ASR不支持此格式
+			globalLogger.Warn().Msgf("检测到 HE-AAC (SBR) 格式，B站ASR不支持")
+			return audioCodecHEAAC, 1, "aac (HE-AAC/SBR - 不支持)"
+		case 29:
+			// HE-AACv2 (PS) - B站ASR不支持此格式
+			globalLogger.Warn().Msgf("检测到 HE-AACv2 (PS) 格式，B站ASR不支持")
+			return audioCodecHEAAC, 1, "aac (HE-AACv2/PS - 不支持)"
+		default:
+			profile = 1 // 未知类型默认用 LC
+			profileName = fmt.Sprintf("AudOTI=%d (as LC)", audOTI)
+		}
+		globalLogger.Info().Msgf("AAC OTI=0x%02X, AudOTI=%d, ADTS profile=%d (%s)", oti, audOTI, profile, profileName)
+		return audioCodecAAC, profile, fmt.Sprintf("aac (MPEG-4 %s)", profileName)
+	default:
+		// 未知 OTI，默认当作 AAC-LC 处理
+		globalLogger.Warn().Msgf("未知的音频 OTI: 0x%02X，将尝试作为 AAC-LC 处理", oti)
+		return audioCodecAAC, 1, fmt.Sprintf("aac (OTI=0x%02X as LC)", oti)
+	}
+}
+
 // videoToAudio 从MP4容器中提取音频轨道（纯Go，无需ffmpeg）
+// 支持的音频格式: AAC (各种profile), MP3
 // 返回: (输出文件路径, 音频格式如"aac"/"mp3", error)
 func videoToAudio(inputPath string) (string, string, error) {
 	inputFile, err := os.Open(inputPath)
@@ -120,44 +201,65 @@ func videoToAudio(inputPath string) (string, string, error) {
 	}
 	defer inputFile.Close()
 
-	demuxer := mp4.CreateMp4Demuxer(inputFile)
-
-	// 读取所有轨道信息
-	tracks, err := demuxer.ReadHead()
+	// 使用 abema/go-mp4 的 Probe 解析 MP4 结构
+	info, err := gomp4.Probe(inputFile)
 	if err != nil {
 		return "", "", fmt.Errorf("解析MP4文件头失败: %v", err)
 	}
 
-	// 找到音频轨道（优先AAC，其次MP3/OPUS）
-	var audioTrack *mp4.TrackInfo
-	for i := range tracks {
-		t := &tracks[i]
-		if t.Cid == mp4.MP4_CODEC_AAC || t.Cid == mp4.MP4_CODEC_MP3 || t.Cid == mp4.MP4_CODEC_OPUS {
+	globalLogger.Info().Msgf("MP4文件信息: brand=%s, 时长=%d, 轨道数=%d",
+		string(info.MajorBrand[:]), info.Duration, len(info.Tracks))
+
+	// 找到音频轨道（CodecMP4A 包含 AAC 和 MP3）
+	var audioTrack *gomp4.Track
+	for _, t := range info.Tracks {
+		if t.Codec == gomp4.CodecMP4A {
 			audioTrack = t
-			if t.Cid == mp4.MP4_CODEC_AAC {
-				break // 优先AAC
-			}
+			break
 		}
 	}
 
 	if audioTrack == nil {
-		return "", "", fmt.Errorf("视频中未找到音频轨道")
+		// 列出所有轨道信息帮助调试
+		var trackInfo []string
+		for i, t := range info.Tracks {
+			trackInfo = append(trackInfo, fmt.Sprintf("Track%d: codec=%d, encrypted=%v", i, t.Codec, t.Encrypted))
+		}
+		return "", "", fmt.Errorf("视频中未找到支持的音频轨道 (mp4a)。轨道列表: %v", trackInfo)
 	}
 
-	globalLogger.Info().Msgf("找到音频轨道: codec=%d, sampleRate=%d, channels=%d, trackId=%d",
-		audioTrack.Cid, audioTrack.SampleRate, audioTrack.ChannelCount, audioTrack.TrackId)
+	// 检测音频编解码类型
+	codecType, aacProfile, codecName := detectAudioCodec(audioTrack.MP4A)
 
-	// 根据编码类型决定输出文件后缀和格式名
-	var outputExt string
-	var audioFormat string
-	switch audioTrack.Cid {
-	case mp4.MP4_CODEC_MP3:
+	// 检查是否为不支持的格式
+	if codecType == audioCodecHEAAC {
+		return "", "", fmt.Errorf("不支持的音频格式: %s。B站ASR仅支持AAC-LC和MP3格式，不支持HE-AAC(SBR)/HE-AACv2(PS)。建议使用其他工具将视频转换为普通AAC格式后再提取文案", codecName)
+	}
+
+	// 根据编解码类型确定输出格式
+	var outputExt, audioFormat string
+	switch codecType {
+	case audioCodecMP3:
 		outputExt = "_temp.mp3"
 		audioFormat = "mp3"
+	case audioCodecAAC:
+		outputExt = "_temp.aac"
+		audioFormat = "aac"
 	default:
 		outputExt = "_temp.aac"
 		audioFormat = "aac"
 	}
+
+	channelCount := uint8(2)
+	if audioTrack.MP4A != nil && audioTrack.MP4A.ChannelCount > 0 {
+		channelCount = uint8(audioTrack.MP4A.ChannelCount)
+	}
+	freqIdx := aacFrequencyIndex(audioTrack.Timescale)
+
+	globalLogger.Info().Msgf("音频轨道: trackID=%d, 编解码=%s, 采样率=%d, 声道=%d, samples=%d, chunks=%d",
+		audioTrack.TrackID, codecName, audioTrack.Timescale, channelCount,
+		len(audioTrack.Samples), len(audioTrack.Chunks))
+
 	outputPath := strings.TrimSuffix(inputPath, filepath.Ext(inputPath)) + outputExt
 	outputFile, err := os.Create(outputPath)
 	if err != nil {
@@ -165,19 +267,79 @@ func videoToAudio(inputPath string) (string, string, error) {
 	}
 	defer outputFile.Close()
 
-	// 提取音频数据
-	// gomedia的ReadPacket返回的AAC数据已包含ADTS头，直接写入即可
-	audioTrackId := audioTrack.TrackId
-	hasData := false
-	for {
-		pkg, err := demuxer.ReadPacket()
-		if err != nil {
-			break // io.EOF 或其他错误表示读取结束
+	// 构建 sample 偏移量表
+	// Chunks 数组中每个 Chunk 包含: DataOffset (chunk在文件中的位置), SamplesPerChunk (该chunk包含的sample数)
+	// Samples 数组中每个 Sample 包含: Size (帧大小)
+	// 在 chunk 内，samples 是连续存储的
+	type sampleInfo struct {
+		offset int64
+		size   uint32
+	}
+	var sampleOffsets []sampleInfo
+
+	globalLogger.Info().Msgf("开始构建sample偏移量表: chunks=%d, totalSamples=%d",
+		len(audioTrack.Chunks), len(audioTrack.Samples))
+
+	sampleIdx := 0
+	for chunkIdx, chunk := range audioTrack.Chunks {
+		chunkOffset := int64(chunk.DataOffset)
+		if chunkIdx < 3 {
+			globalLogger.Debug().Msgf("Chunk %d: offset=%d, samplesPerChunk=%d",
+				chunkIdx, chunkOffset, chunk.SamplesPerChunk)
 		}
-		if pkg.TrackId != audioTrackId {
+		for i := uint32(0); i < chunk.SamplesPerChunk && sampleIdx < len(audioTrack.Samples); i++ {
+			sample := audioTrack.Samples[sampleIdx]
+			sampleOffsets = append(sampleOffsets, sampleInfo{
+				offset: chunkOffset,
+				size:   sample.Size,
+			})
+			chunkOffset += int64(sample.Size)
+			sampleIdx++
+		}
+	}
+
+	if len(sampleOffsets) == 0 {
+		os.Remove(outputPath)
+		return "", "", fmt.Errorf("无法构建sample偏移量表")
+	}
+
+	globalLogger.Info().Msgf("偏移量表构建完成: %d samples, 第一个sample: offset=%d size=%d",
+		len(sampleOffsets), sampleOffsets[0].offset, sampleOffsets[0].size)
+
+	// 提取所有 sample
+	hasData := false
+	for idx, si := range sampleOffsets {
+		if si.size == 0 {
 			continue
 		}
-		outputFile.Write(pkg.Data)
+
+		// 定位并读取裸音频帧数据
+		if _, err := inputFile.Seek(si.offset, io.SeekStart); err != nil {
+			os.Remove(outputPath)
+			return "", "", fmt.Errorf("seek sample %d 失败 (offset=%d): %v", idx, si.offset, err)
+		}
+		buf := make([]byte, si.size)
+		if _, err := io.ReadFull(inputFile, buf); err != nil {
+			os.Remove(outputPath)
+			return "", "", fmt.Errorf("读取sample %d 失败 (offset=%d, size=%d): %v", idx, si.offset, si.size, err)
+		}
+
+		// AAC 需要添加 ADTS 头，MP3 直接写入原始数据
+		if codecType == audioCodecAAC {
+			adts := makeADTSHeader(aacProfile, freqIdx, channelCount, uint16(si.size))
+			// 第一帧打印详细调试信息
+			if idx == 0 {
+				globalLogger.Info().Msgf("ADTS参数: profile=%d, freqIdx=%d, channels=%d, frameLen=%d",
+					aacProfile, freqIdx, channelCount, si.size)
+				globalLogger.Info().Msgf("ADTS头 (hex): %02X %02X %02X %02X %02X %02X %02X",
+					adts[0], adts[1], adts[2], adts[3], adts[4], adts[5], adts[6])
+				if len(buf) >= 4 {
+					globalLogger.Info().Msgf("AAC帧前4字节 (hex): %02X %02X %02X %02X", buf[0], buf[1], buf[2], buf[3])
+				}
+			}
+			outputFile.Write(adts)
+		}
+		outputFile.Write(buf)
 		hasData = true
 	}
 
@@ -186,8 +348,59 @@ func videoToAudio(inputPath string) (string, string, error) {
 		return "", "", fmt.Errorf("未能从视频中提取到音频数据")
 	}
 
-	globalLogger.Info().Msgf("音频提取完成: %s (格式: %s)", outputPath, audioFormat)
+	// 确保数据写入磁盘
+	outputFile.Sync()
+
+	// 检查输出文件大小
+	fileInfo, err := os.Stat(outputPath)
+	if err != nil {
+		return "", "", fmt.Errorf("检查输出文件失败: %v", err)
+	}
+	if fileInfo.Size() < 1000 {
+		globalLogger.Warn().Msgf("提取的音频文件过小: %d bytes，可能无效", fileInfo.Size())
+	}
+
+	globalLogger.Info().Msgf("音频提取完成: %s (格式: %s, 采样数: %d, 文件大小: %d bytes)", outputPath, audioFormat, len(sampleOffsets), fileInfo.Size())
 	return outputPath, audioFormat, nil
+}
+
+// makeADTSHeader 生成7字节的ADTS头，用于封装裸AAC帧
+// profile: ADTS profile (0=Main, 1=LC, 2=SSR, 3=LTP)
+// freqIdx: 采样率索引 (见 aacFrequencyIndex)
+// chanConf: 声道配置
+// frameLen: 裸AAC帧长度（不含ADTS头）
+func makeADTSHeader(profile, freqIdx, chanConf uint8, frameLen uint16) []byte {
+	adtsLen := frameLen + 7
+	h := make([]byte, 7)
+	h[0] = 0xFF
+	h[1] = 0xF1 // sync(4) + ID=0(MPEG-4) + layer=00 + protection_absent=1
+	h[2] = (profile << 6) | (freqIdx << 2) | (chanConf >> 2)
+	h[3] = ((chanConf & 0x3) << 6) | byte((adtsLen>>11)&0x3)
+	h[4] = byte(adtsLen >> 3)
+	h[5] = byte(adtsLen&0x7)<<5 | 0x1F // buffer fullness = 0x7FF (VBR)
+	h[6] = 0xFC                         // buffer fullness low + numFrames-1=0
+	return h
+}
+
+// aacFrequencyIndex 将采样率映射到ADTS频率索引
+func aacFrequencyIndex(sampleRate uint32) uint8 {
+	rates := [...]uint32{96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350}
+	for i, r := range rates {
+		if sampleRate == r {
+			globalLogger.Info().Msgf("采样率 %d Hz 匹配索引 %d", sampleRate, i)
+			return uint8(i)
+		}
+	}
+	// 如果不是标准采样率，尝试找最接近的
+	globalLogger.Warn().Msgf("非标准采样率: %d Hz，尝试找最接近的值", sampleRate)
+	for i, r := range rates {
+		if sampleRate >= r {
+			globalLogger.Info().Msgf("采样率 %d Hz 近似匹配索引 %d (%d Hz)", sampleRate, i, r)
+			return uint8(i)
+		}
+	}
+	globalLogger.Warn().Msgf("无法匹配采样率 %d Hz，使用默认索引 4 (44100 Hz)", sampleRate)
+	return 4 // 默认44100
 }
 
 // upload 上传音频文件
@@ -432,7 +645,7 @@ func (asr *BcutASR) pollResult() (*ASRResult, error) {
 			return nil, fmt.Errorf("查询结果失败, code: %d, message: %s", resultResp.Code, resultResp.Message)
 		}
 
-		globalLogger.Info().Msgf("查询状态: state=%d, remark=%s", resultResp.Data.State, resultResp.Data.Remark)
+		globalLogger.Info().Msgf("查询状态: state=%d, remark=%s, result长度=%d", resultResp.Data.State, resultResp.Data.Remark, len(resultResp.Data.Result))
 
 		// state: 0=停止, 1=运行中, 3=错误, 4=完成
 		switch resultResp.Data.State {
@@ -443,7 +656,12 @@ func (asr *BcutASR) pollResult() (*ASRResult, error) {
 			}
 			return &asrResult, nil
 		case 3: // 错误
-			return nil, fmt.Errorf("ASR识别失败: %s", resultResp.Data.Remark)
+			remark := resultResp.Data.Remark
+			if remark == "" {
+				remark = "未知错误(可能是音频格式不支持或文件损坏)"
+			}
+			globalLogger.Error().Msgf("ASR失败完整响应: %s", string(respBody))
+			return nil, fmt.Errorf("ASR识别失败: %s", remark)
 		}
 
 		// 等待3秒后继续查询（避免过于频繁）
