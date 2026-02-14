@@ -646,18 +646,32 @@ const resetTableHeight = () => {
 const buildClassify = () => {
   const mimeMap = store.globalConfig.MimeMap ?? {}
   const seen = new Set()
+  // 常用类型排序优先级（越小越靠前）
+  const typePriority: { [key: string]: number } = {
+    video: 1,
+    audio: 2,
+    m3u8: 3,
+    live: 4,
+    image: 5,
+  }
+  const types = Object.values(mimeMap)
+      .filter(({Type}) => {
+        if (seen.has(Type)) return false
+        seen.add(Type)
+        return true
+      })
+      .map(({Type}) => ({
+        value: Type,
+        label: classifyAlias[Type] ?? Type,
+      }))
+      .sort((a, b) => {
+        const pa = typePriority[a.value] ?? 100
+        const pb = typePriority[b.value] ?? 100
+        return pa - pb
+      })
   classify.value = [
     {value: "all", label: computed(() => t("index.all"))},
-    ...Object.values(mimeMap)
-        .filter(({Type}) => {
-          if (seen.has(Type)) return false
-          seen.add(Type)
-          return true
-        })
-        .map(({Type}) => ({
-          value: Type,
-          label: classifyAlias[Type] ?? Type,
-        })),
+    ...types,
   ]
 }
 
@@ -1061,26 +1075,41 @@ let activeCaptions = 0
 const maxConcurrentCaptions = 5
 
 const processOneCaptionTask = async (row: appType.MediaInfo, index: number) => {
-  const item = data.value[index]
-  if (!item || item.Id !== row.Id) return
+  // 根据 Id 查找实际 index（避免列表刷新导致 index 对不上）
+  const realIndex = data.value.findIndex(item => item.Id === row.Id)
+  if (realIndex === -1) {
+    console.warn('提取文案: 找不到项目', row.Id)
+    activeCaptions--
+    processCaptionQueue()
+    return
+  }
+  const item = data.value[realIndex]
 
   item.Status = 'extracting'
   try {
     const res: appType.Res = await appApi.extractCaption(item)
-    if (res.code !== 0 && res.data?.text?.trim()) {
+    console.log('提取文案响应:', res)
+    // 后端成功返回 code=1，失败返回 code=0
+    if (res.code === 1) {
       item.Status = 'extract_done'
-      const txtPath = res.data.txt_path || ''
+      const txtPath = res.data?.txt_path || ''
       item.CaptionPath = txtPath
       if (txtPath) {
         window?.$message?.success(t("index.extract_caption_saved") + `: ${txtPath}`)
+      } else {
+        window?.$message?.success(t("index.extract_caption_saved"))
       }
     } else {
       item.Status = 'extract_error'
-      window?.$message?.error(`${item.Domain}: ${res.message || t("index.extract_caption_error")}`)
+      const errMsg = res.message || t("index.extract_caption_error")
+      window?.$message?.error(`${item.Domain || '提取文案'}: ${errMsg}`)
+      console.error('提取文案失败:', errMsg)
     }
-  } catch (err) {
+  } catch (err: any) {
     item.Status = 'extract_error'
-    window?.$message?.error(`${item.Domain}: ${t("index.extract_caption_error")}`)
+    const errMsg = err?.message || t("index.extract_caption_error")
+    window?.$message?.error(`${item.Domain || '提取文案'}: ${errMsg}`)
+    console.error('提取文案异常:', err)
   }
   cacheData()
 

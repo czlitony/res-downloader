@@ -10,7 +10,6 @@ require (
 	github.com/rs/zerolog v1.33.0
 	github.com/vrischmann/userdir v0.0.0-20151206171402-20f291cebd68
 	github.com/wailsapp/wails/v2 v2.11.0
-	github.com/yapingcat/gomedia v0.0.0-20240906162731-17feea57090c
 	golang.org/x/net v0.35.0
 	golang.org/x/sys v0.30.0
 )

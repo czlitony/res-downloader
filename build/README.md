@@ -1,3 +1,55 @@
+## FFmpeg 依赖
+
+提取文案功能需要 ffmpeg 来转换视频中的音频。有两种方式：
+
+### 方式1：用户自行安装 (推荐开发调试)
+- Windows: 下载 https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip 并将 ffmpeg.exe 加入 PATH
+- macOS: `brew install ffmpeg`
+- Linux: `apt install ffmpeg` / `dnf install ffmpeg` / `pacman -S ffmpeg`
+
+### 方式2：打包时嵌入 ffmpeg (推荐发布)
+
+**一键下载所有平台的 ffmpeg：**
+```bash
+# Windows PowerShell
+.\scripts\download-ffmpeg.ps1
+
+# macOS/Linux
+./scripts/download-ffmpeg.sh
+```
+
+下载后的目录结构：
+```
+ffmpeg-bin/
+├── windows-amd64/ffmpeg.exe
+├── darwin-universal/ffmpeg
+├── linux-amd64/ffmpeg
+└── linux-arm64/ffmpeg
+```
+
+**打包时复制 ffmpeg 到输出目录：**
+
+Windows:
+```powershell
+# 构建后复制
+cp ffmpeg-bin/windows-amd64/ffmpeg.exe build/bin/
+```
+
+macOS:
+```bash
+# 构建后复制到 .app/Contents/Resources/
+cp ffmpeg-bin/darwin-universal/ffmpeg build/bin/res-downloader.app/Contents/Resources/
+```
+
+Linux:
+```bash
+# 构建后复制
+cp ffmpeg-bin/linux-amd64/ffmpeg build/bin/
+# 或打包 deb/AppImage 时一起打包
+```
+
+---
+
 ## Mac
 ```bash
 wails build -platform "darwin/universal"

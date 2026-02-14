@@ -8,12 +8,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
-
-	mp4 "github.com/yapingcat/gomedia/go-mp4"
 )
 
 const (
@@ -111,83 +111,95 @@ func (asr *BcutASR) Run() (string, error) {
 	return text, nil
 }
 
-// videoToAudio 从MP4容器中提取音频轨道（纯Go，无需ffmpeg）
+// videoToAudio 从视频中提取音频（使用ffmpeg）
 // 返回: (输出文件路径, 音频格式如"aac"/"mp3", error)
 func videoToAudio(inputPath string) (string, string, error) {
-	inputFile, err := os.Open(inputPath)
+	ffmpegPath, err := getFFmpegPath()
 	if err != nil {
-		return "", "", fmt.Errorf("打开视频文件失败: %v", err)
-	}
-	defer inputFile.Close()
-
-	demuxer := mp4.CreateMp4Demuxer(inputFile)
-
-	// 读取所有轨道信息
-	tracks, err := demuxer.ReadHead()
-	if err != nil {
-		return "", "", fmt.Errorf("解析MP4文件头失败: %v", err)
+		return "", "", fmt.Errorf("未找到ffmpeg: %v。请确保ffmpeg已安装或放置在程序目录下", err)
 	}
 
-	// 找到音频轨道（优先AAC，其次MP3/OPUS）
-	var audioTrack *mp4.TrackInfo
-	for i := range tracks {
-		t := &tracks[i]
-		if t.Cid == mp4.MP4_CODEC_AAC || t.Cid == mp4.MP4_CODEC_MP3 || t.Cid == mp4.MP4_CODEC_OPUS {
-			audioTrack = t
-			if t.Cid == mp4.MP4_CODEC_AAC {
-				break // 优先AAC
+	globalLogger.Info().Msgf("使用 ffmpeg: %s", ffmpegPath)
+
+	// 输出为 mp3 格式（兼容性最好，B站ASR支持）
+	outputPath := strings.TrimSuffix(inputPath, filepath.Ext(inputPath)) + "_temp.mp3"
+	audioFormat := "mp3"
+
+	// ffmpeg 命令：提取音频转为 mp3，128k 比特率
+	// -y: 覆盖输出文件
+	// -i: 输入文件
+	// -vn: 不处理视频
+	// -acodec libmp3lame: 使用 mp3 编码器
+	// -ab 128k: 比特率 128kbps
+	// -ar 44100: 采样率 44100Hz
+	// -ac 2: 双声道
+	args := []string{
+		"-y",
+		"-i", inputPath,
+		"-vn",
+		"-acodec", "libmp3lame",
+		"-ab", "128k",
+		"-ar", "44100",
+		"-ac", "2",
+		outputPath,
+	}
+
+	globalLogger.Info().Msgf("执行: ffmpeg %s", strings.Join(args, " "))
+
+	cmd := exec.Command(ffmpegPath, args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return "", "", fmt.Errorf("ffmpeg 执行失败: %v, stderr: %s", err, stderr.String())
+	}
+
+	// 检查输出文件
+	fileInfo, err := os.Stat(outputPath)
+	if err != nil {
+		return "", "", fmt.Errorf("输出文件不存在: %v", err)
+	}
+	if fileInfo.Size() < 1000 {
+		os.Remove(outputPath)
+		return "", "", fmt.Errorf("输出文件过小，可能转换失败")
+	}
+
+	globalLogger.Info().Msgf("音频提取完成: %s (格式: %s, 大小: %d bytes)", outputPath, audioFormat, fileInfo.Size())
+	return outputPath, audioFormat, nil
+}
+
+// getFFmpegPath 获取 ffmpeg 可执行文件路径
+// 优先级: 1. 程序目录下的 ffmpeg  2. 系统 PATH 中的 ffmpeg
+func getFFmpegPath() (string, error) {
+	ffmpegName := "ffmpeg"
+	if runtime.GOOS == "windows" {
+		ffmpegName = "ffmpeg.exe"
+	}
+
+	// 1. 检查程序目录
+	exePath, err := os.Executable()
+	if err == nil {
+		exeDir := filepath.Dir(exePath)
+		localFFmpeg := filepath.Join(exeDir, ffmpegName)
+		if _, err := os.Stat(localFFmpeg); err == nil {
+			return localFFmpeg, nil
+		}
+
+		// macOS: 检查 .app/Contents/Resources 目录
+		if runtime.GOOS == "darwin" {
+			resourcesFFmpeg := filepath.Join(exeDir, "..", "Resources", ffmpegName)
+			if _, err := os.Stat(resourcesFFmpeg); err == nil {
+				return resourcesFFmpeg, nil
 			}
 		}
 	}
 
-	if audioTrack == nil {
-		return "", "", fmt.Errorf("视频中未找到音频轨道")
+	// 2. 检查系统 PATH
+	if path, err := exec.LookPath(ffmpegName); err == nil {
+		return path, nil
 	}
 
-	globalLogger.Info().Msgf("找到音频轨道: codec=%d, sampleRate=%d, channels=%d, trackId=%d",
-		audioTrack.Cid, audioTrack.SampleRate, audioTrack.ChannelCount, audioTrack.TrackId)
-
-	// 根据编码类型决定输出文件后缀和格式名
-	var outputExt string
-	var audioFormat string
-	switch audioTrack.Cid {
-	case mp4.MP4_CODEC_MP3:
-		outputExt = "_temp.mp3"
-		audioFormat = "mp3"
-	default:
-		outputExt = "_temp.aac"
-		audioFormat = "aac"
-	}
-	outputPath := strings.TrimSuffix(inputPath, filepath.Ext(inputPath)) + outputExt
-	outputFile, err := os.Create(outputPath)
-	if err != nil {
-		return "", "", fmt.Errorf("创建音频文件失败: %v", err)
-	}
-	defer outputFile.Close()
-
-	// 提取音频数据
-	// gomedia的ReadPacket返回的AAC数据已包含ADTS头，直接写入即可
-	audioTrackId := audioTrack.TrackId
-	hasData := false
-	for {
-		pkg, err := demuxer.ReadPacket()
-		if err != nil {
-			break // io.EOF 或其他错误表示读取结束
-		}
-		if pkg.TrackId != audioTrackId {
-			continue
-		}
-		outputFile.Write(pkg.Data)
-		hasData = true
-	}
-
-	if !hasData {
-		os.Remove(outputPath)
-		return "", "", fmt.Errorf("未能从视频中提取到音频数据")
-	}
-
-	globalLogger.Info().Msgf("音频提取完成: %s (格式: %s)", outputPath, audioFormat)
-	return outputPath, audioFormat, nil
+	return "", fmt.Errorf("在程序目录和系统PATH中均未找到 %s", ffmpegName)
 }
 
 // upload 上传音频文件

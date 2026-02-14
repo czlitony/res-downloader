@@ -54,10 +54,34 @@ jobs:
       - name: Build
         run: wails build -clean -platform ${{ matrix.platform }}
 
+      # Download ffmpeg for each platform
+      - name: Download ffmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath .
+          $dir = Get-ChildItem -Directory | Where-Object { $_.Name -like "ffmpeg-*-essentials*" } | Select-Object -First 1
+          Copy-Item "$($dir.FullName)\bin\ffmpeg.exe" -Destination build\bin\
+
+      - name: Download ffmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          curl -L -o ffmpeg.zip "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip"
+          unzip ffmpeg.zip
+          mkdir -p build/bin/res-downloader.app/Contents/Resources
+          cp ffmpeg build/bin/res-downloader.app/Contents/Resources/
+
+      - name: Download ffmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          wget -q https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+          tar xf ffmpeg-release-amd64-static.tar.xz
+          cp ffmpeg-*-amd64-static/ffmpeg build/bin/
+
       # Package artifacts
       - name: Archive Windows
         if: runner.os == 'Windows'
-        run: Compress-Archive -Path build\bin\res-downloader.exe -DestinationPath res-downloader-windows-amd64.zip
+        run: Compress-Archive -Path build\bin\res-downloader.exe,build\bin\ffmpeg.exe -DestinationPath res-downloader-windows-amd64.zip
 
       - name: Archive macOS
         if: runner.os == 'macOS'
@@ -69,7 +93,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           cd build/bin
-          tar czf ../../res-downloader-linux-amd64.tar.gz res-downloader
+          tar czf ../../res-downloader-linux-amd64.tar.gz res-downloader ffmpeg
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
