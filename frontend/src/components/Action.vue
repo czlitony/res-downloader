@@ -1,5 +1,5 @@
 <template>
-  <div style="--wails-draggable:no-drag" class="grid grid-cols-3 gap-1.5">
+  <div style="--wails-draggable:no-drag" :class="['grid gap-1.5', row.Classify === 'video' ? 'grid-cols-4' : 'grid-cols-3']">
     <n-icon
         size="30"
         class="text-emerald-600 dark:text-emerald-400 bg-emerald-500/20 dark:bg-emerald-500/30 rounded-full flex items-center justify-center p-1.5 cursor-pointer hover:bg-emerald-500/40 transition-colors"
@@ -15,6 +15,19 @@
     >
       <TrashOutline/>
     </n-icon>
+
+    <n-tooltip trigger="hover" v-if="row.Classify === 'video'">
+      <template #trigger>
+        <n-icon
+            size="28"
+            class="text-purple-400 dark:text-purple-200 bg-purple-500/20 dark:bg-purple-500/30 rounded-full flex items-center justify-center p-1.5 cursor-pointer hover:bg-purple-500/40 transition-colors"
+            @click="action('extract_caption')"
+        >
+          <DocumentTextOutline/>
+        </n-icon>
+      </template>
+      {{ t("index.extract_caption") }}
+    </n-tooltip>
 
     <NPopover placement="bottom" trigger="hover">
       <template #trigger>
@@ -72,12 +85,15 @@
           </n-icon>
           <span class="ml-1">{{ t("index.copy_data") }}</span>
         </div>
+
+
       </div>
     </NPopover>
   </div>
 </template>
 
 <script setup lang="ts">
+import {NTooltip} from 'naive-ui'
 import {useI18n} from 'vue-i18n'
 import {
   DownloadOutline,
@@ -87,7 +103,8 @@ import {
   LinkOutline,
   GridSharp,
   CloseOutline,
-  TrashOutline
+  TrashOutline,
+  DocumentTextOutline
 } from "@vicons/ionicons5"
 
 const {t} = useI18n()

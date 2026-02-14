@@ -45,6 +45,7 @@ export namespace appType {
         Suffix: string
         SavePath: string
         Status: string
+        CaptionPath: string
         DecodeKey: string
         Description: string
         ContentType: string

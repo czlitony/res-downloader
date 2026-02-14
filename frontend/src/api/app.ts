@@ -120,4 +120,11 @@ export default {
             data: data
         })
     },
+    extractCaption(data: object) {
+        return request({
+            url: 'api/extract-caption',
+            method: 'post',
+            data: data
+        })
+    },
 }

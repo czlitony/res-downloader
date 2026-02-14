@@ -348,6 +348,51 @@ func (h *HttpServer) download(w http.ResponseWriter, r *http.Request) {
 	h.success(w)
 }
 
+func (h *HttpServer) extractCaption(w http.ResponseWriter, r *http.Request) {
+	var data struct {
+		shared.MediaInfo
+	}
+	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		h.error(w, err.Error())
+		return
+	}
+
+	// 检查视频文件是否已下载
+	videoPath := data.SavePath
+	if videoPath == "" {
+		h.error(w, "请先下载视频文件")
+		return
+	}
+
+	// 检查文件是否存在
+	if _, err := os.Stat(videoPath); os.IsNotExist(err) {
+		h.error(w, "视频文件不存在: "+videoPath)
+		return
+	}
+
+	// 使用BcutASR提取文案（无需Cookie）
+	asr := NewBcutASR(videoPath)
+	text, err := asr.Run()
+	if err != nil {
+		h.error(w, "提取文案失败: "+err.Error())
+		return
+	}
+
+	// 保存为txt文件
+	txtFileName := strings.TrimSuffix(filepath.Base(videoPath), filepath.Ext(videoPath)) + "_caption.txt"
+	txtPath := filepath.Join(filepath.Dir(videoPath), txtFileName)
+	
+	if err := SaveASRResultToFile(text, txtPath); err != nil {
+		h.error(w, "保存文案失败: "+err.Error())
+		return
+	}
+
+	h.success(w, map[string]interface{}{
+		"text":     text,
+		"txt_path": txtPath,
+	})
+}
+
 func (h *HttpServer) cancel(w http.ResponseWriter, r *http.Request) {
 	var data struct {
 		shared.MediaInfo

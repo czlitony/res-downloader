@@ -36,6 +36,7 @@ type Config struct {
 	UserAgent     string              `json:"UserAgent"`
 	UseHeaders    string              `json:"UseHeaders"`
 	InsertTail    bool                `json:"InsertTail"`
+	BiliCookie    string              `json:"BiliCookie"` // B站Cookie，用于ASR识别
 	MimeMap       map[string]MimeInfo `json:"MimeMap"`
 	Rule          string              `json:"Rule"`
 }
@@ -68,6 +69,7 @@ func initConfig() *Config {
 		UserAgent:     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
 		UseHeaders:    "default",
 		InsertTail:    true,
+		BiliCookie:    "", // 默认为空，需要用户配置
 		MimeMap:       getDefaultMimeMap(),
 		Rule:          "*",
 	}
@@ -228,6 +230,7 @@ func (c *Config) setConfig(config Config) {
 	c.WxAction = config.WxAction
 	c.UseHeaders = config.UseHeaders
 	c.InsertTail = config.InsertTail
+	c.BiliCookie = config.BiliCookie
 	c.Rule = config.Rule
 	if oldProxy != c.UpstreamProxy || openProxy != c.OpenProxy {
 		proxyOnce.setTransport()
@@ -288,6 +291,8 @@ func (c *Config) getConfig(key string) interface{} {
 		return c.UseHeaders
 	case "InsertTail":
 		return c.InsertTail
+	case "BiliCookie":
+		return c.BiliCookie
 	case "MimeMap":
 		mimeMux.RLock()
 		defer mimeMux.RUnlock()

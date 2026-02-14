@@ -59,6 +59,14 @@
             </template>
             {{ t('index.batch_download') }}
           </NButton>
+          <NButton tertiary type="primary" @click.stop="batchExtractCaption">
+            <template #icon>
+              <n-icon>
+                <DocumentTextOutline/>
+              </n-icon>
+            </template>
+            {{ t('index.batch_extract_caption') }}
+          </NButton>
           <NButton tertiary type="info">
             <NPopover placement="bottom" trigger="hover">
               <template #trigger>
@@ -159,7 +167,8 @@ import {
   ServerOutline,
   SearchOutline,
   Apps,
-  TrashOutline, CloseOutline
+  TrashOutline, CloseOutline,
+  DocumentTextOutline
 } from "@vicons/ionicons5"
 import {useDialog} from 'naive-ui'
 import * as bind from "../../wailsjs/go/core/Bind"
@@ -220,7 +229,10 @@ const dwStatus = computed<any>(() => {
     running: t("index.running"),
     error: t("index.error"),
     done: t("index.done"),
-    handle: t("index.handle")
+    handle: t("index.handle"),
+    extracting: t("index.extracting"),
+    extract_done: t("index.extract_done"),
+    extract_error: t("index.extract_error")
   }
 })
 
@@ -351,13 +363,19 @@ const columns = ref<any[]>([
   {
     title: computed(() => t("index.status")),
     key: "Status",
-    width: 80,
+    width: 110,
     render: (row: appType.MediaInfo, index: number) => {
       let status = "info"
       if (row.Status === "done" || row.Status === "running") {
         status = "success"
       } else if (row.Status === "pending") {
         status = "warning"
+      } else if (row.Status === "extracting") {
+        status = "warning"
+      } else if (row.Status === "extract_done") {
+        status = "success"
+      } else if (row.Status === "extract_error") {
+        status = "error"
       }
 
       return h(
@@ -370,7 +388,9 @@ const columns = ref<any[]>([
               margin: "2px"
             },
             onClick: () => {
-              if (row.SavePath && row.Status === "done") {
+              if (row.Status === "extract_done" && row.CaptionPath) {
+                appApi.openFolder({filePath: row.CaptionPath})
+              } else if (row.SavePath && row.Status === "done") {
                 appApi.openFolder({filePath: row.SavePath})
               } else if (row.Status === "ready") {
                 download(row, index)
@@ -455,7 +475,7 @@ const columns = ref<any[]>([
   },
   {
     key: "actions",
-    width: 130,
+    width: 160,
     render(row: appType.MediaInfo, index: number) {
       return h(Action, {key: index, row: row, index: index, onAction: dataAction})
     },
@@ -559,6 +579,15 @@ onMounted(() => {
           }
           cacheData()
           checkQueue()
+          // 检查是否有等待提取文案的任务
+          if (pendingCaptionExtractions.value.has(res.Id)) {
+            const idx = pendingCaptionExtractions.value.get(res.Id)!
+            pendingCaptionExtractions.value.delete(res.Id)
+            const updatedRow = data.value[idx]
+            if (updatedRow && updatedRow.Status === 'done') {
+              doExtractCaption(updatedRow, idx)
+            }
+          }
           break
         case "error":
           updateItem(res.Id, item => {
@@ -570,6 +599,11 @@ onMounted(() => {
           }
           cacheData()
           checkQueue()
+          // 下载失败，取消等待提取文案
+          if (pendingCaptionExtractions.value.has(res.Id)) {
+            pendingCaptionExtractions.value.delete(res.Id)
+            window?.$message?.error(t("index.extract_caption_error"))
+          }
           break
       }
     }
@@ -685,6 +719,9 @@ const dataAction = (row: appType.MediaInfo, index: number, type: string) => {
     case "decode":
       decodeWxFile(row, index)
       break
+    case "extract_caption":
+      extractCaption(row, index)
+      break
     case "delete":
       if (row.Status === "pending" || row.Status === "running") {
         window?.$message?.error(t("index.delete_tip"))
@@ -737,6 +774,55 @@ const batchDown = async () => {
       download(item, index)
     }
   })
+
+  checkedRowKeysValue.value = []
+}
+
+const batchExtractCaption = () => {
+  if (checkedRowKeysValue.value.length <= 0) {
+    window?.$message?.error(t("index.use_data"))
+    return
+  }
+
+  // 筛选出选中的视频项
+  const videoItems: { row: appType.MediaInfo, index: number }[] = []
+  data.value.forEach((item, index) => {
+    if (checkedRowKeysValue.value.includes(item.Id) && item.Classify === 'video') {
+      videoItems.push({ row: item, index })
+    }
+  })
+
+  if (videoItems.length === 0) {
+    window?.$message?.warning(t("index.batch_extract_caption_no_video"))
+    return
+  }
+
+  // 分成已下载和未下载两组
+  const isVideoDownloaded = (v: { row: appType.MediaInfo }) => 
+    v.row.SavePath && (v.row.Status === 'done' || v.row.Status === 'extract_done' || v.row.Status === 'extract_error')
+  const downloaded = videoItems.filter(v => isVideoDownloaded(v))
+  const notDownloaded = videoItems.filter(v => !isVideoDownloaded(v))
+
+  // 未下载的先触发下载，下载完后自动提取
+  notDownloaded.forEach(({ row, index }) => {
+    pendingCaptionExtractions.value.set(row.Id, index)
+    if (row.Status !== 'running' && row.Status !== 'pending') {
+      download(row, index)
+    }
+  })
+
+  if (notDownloaded.length > 0) {
+    window?.$message?.info(t("index.batch_extract_caption_downloading", { count: notDownloaded.length }))
+  }
+
+  // 已下载的加入提取队列
+  downloaded.forEach(({ row, index }) => {
+    doExtractCaption(row, index)
+  })
+
+  if (downloaded.length > 0) {
+    window?.$message?.info(t("index.batch_extract_caption_started", { count: downloaded.length }))
+  }
 
   checkedRowKeysValue.value = []
 }
@@ -944,6 +1030,77 @@ const decodeWxFile = (row: appType.MediaInfo, index: number) => {
       })
     }
   })
+}
+
+// 下载完成后需要自动提取文案的项目 (Id -> index)
+const pendingCaptionExtractions = ref<Map<string, number>>(new Map())
+
+const extractCaption = (row: appType.MediaInfo, index: number) => {
+  // 如果视频还没下载，先自动下载
+  const isDownloaded = row.SavePath && (row.Status === 'done' || row.Status === 'extract_done' || row.Status === 'extract_error')
+  if (!isDownloaded) {
+    if (row.Status === 'running' || row.Status === 'pending') {
+      // 已在下载中，标记等待提取
+      pendingCaptionExtractions.value.set(row.Id, index)
+      window?.$message?.info(t("index.extract_caption_downloading"))
+      return
+    }
+    // 标记等待提取，然后触发下载
+    pendingCaptionExtractions.value.set(row.Id, index)
+    window?.$message?.info(t("index.extract_caption_auto_download"))
+    download(row, index)
+    return
+  }
+  
+  doExtractCaption(row, index)
+}
+
+// 提取文案队列（最多5个并发）
+const captionQueue = ref<{ row: appType.MediaInfo, index: number }[]>([])
+let activeCaptions = 0
+const maxConcurrentCaptions = 5
+
+const processOneCaptionTask = async (row: appType.MediaInfo, index: number) => {
+  const item = data.value[index]
+  if (!item || item.Id !== row.Id) return
+
+  item.Status = 'extracting'
+  try {
+    const res: appType.Res = await appApi.extractCaption(item)
+    if (res.code !== 0 && res.data?.text?.trim()) {
+      item.Status = 'extract_done'
+      const txtPath = res.data.txt_path || ''
+      item.CaptionPath = txtPath
+      if (txtPath) {
+        window?.$message?.success(t("index.extract_caption_saved") + `: ${txtPath}`)
+      }
+    } else {
+      item.Status = 'extract_error'
+      window?.$message?.error(`${item.Domain}: ${res.message || t("index.extract_caption_error")}`)
+    }
+  } catch (err) {
+    item.Status = 'extract_error'
+    window?.$message?.error(`${item.Domain}: ${t("index.extract_caption_error")}`)
+  }
+  cacheData()
+
+  activeCaptions--
+  processCaptionQueue()
+}
+
+const processCaptionQueue = () => {
+  while (captionQueue.value.length > 0 && activeCaptions < maxConcurrentCaptions) {
+    const task = captionQueue.value.shift()!
+    activeCaptions++
+    processOneCaptionTask(task.row, task.index)
+  }
+}
+
+const doExtractCaption = (row: appType.MediaInfo, index: number) => {
+  // 避免重复加入队列
+  if (row.Status === 'extracting') return
+  captionQueue.value.push({ row, index })
+  processCaptionQueue()
 }
 
 const handleImport = (content: string) => {
