@@ -456,8 +456,11 @@ func (asr *BcutASR) pollResult() (*ASRResult, error) {
 // toText 将ASR结果转换为纯文本
 func (asr *BcutASR) toText(result *ASRResult) string {
 	var text strings.Builder
-	for _, utterance := range result.Utterances {
+	for i, utterance := range result.Utterances {
 		text.WriteString(utterance.Transcript)
+		if i < len(result.Utterances)-1 {
+			text.WriteString("\n")
+		}
 	}
 	return text.String()
 }
