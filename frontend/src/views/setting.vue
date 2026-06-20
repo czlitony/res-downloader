@@ -77,6 +77,30 @@
             </NTooltip>
           </NFormItem>
 
+          <NFormItem :label="t('setting.caption_keep_video')" path="CaptionKeepVideo">
+            <NSwitch v-model:value="formValue.CaptionKeepVideo"/>
+            <NTooltip trigger="hover">
+              <template #trigger>
+                <NIcon size="18" class="ml-1 text-gray-500">
+                  <HelpCircleOutline/>
+                </NIcon>
+              </template>
+              {{ t("setting.caption_keep_video_tip") }}
+            </NTooltip>
+          </NFormItem>
+
+          <NFormItem :label="t('setting.caption_keep_audio')" path="CaptionKeepAudio">
+            <NSwitch v-model:value="formValue.CaptionKeepAudio"/>
+            <NTooltip trigger="hover">
+              <template #trigger>
+                <NIcon size="18" class="ml-1 text-gray-500">
+                  <HelpCircleOutline/>
+                </NIcon>
+              </template>
+              {{ t("setting.caption_keep_audio_tip") }}
+            </NTooltip>
+          </NFormItem>
+
           <NFormItem >
             <n-popconfirm @positive-click="resetHandle">
               <template #trigger>

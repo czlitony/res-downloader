@@ -14,7 +14,6 @@ declare module 'vue' {
     Index: typeof import('./src/components/layout/Index.vue')['default']
     NaiveProvider: typeof import('./src/components/NaiveProvider.vue')['default']
     NButton: typeof import('naive-ui')['NButton']
-    NButtonGroup: typeof import('naive-ui')['NButtonGroup']
     NCheckbox: typeof import('naive-ui')['NCheckbox']
     NConfigProvider: typeof import('naive-ui')['NConfigProvider']
     NDataTable: typeof import('naive-ui')['NDataTable']

@@ -17,28 +17,30 @@ type MimeInfo struct {
 
 // Config struct
 type Config struct {
-	storage       *Storage
-	Theme         string              `json:"Theme"`
-	Locale        string              `json:"Locale"`
-	Host          string              `json:"Host"`
-	Port          string              `json:"Port"`
-	Quality       int                 `json:"Quality"`
-	SaveDirectory string              `json:"SaveDirectory"`
-	FilenameLen   int                 `json:"FilenameLen"`
-	FilenameTime  bool                `json:"FilenameTime"`
-	UpstreamProxy string              `json:"UpstreamProxy"`
-	OpenProxy     bool                `json:"OpenProxy"`
-	DownloadProxy bool                `json:"DownloadProxy"`
-	AutoProxy     bool                `json:"AutoProxy"`
-	WxAction      bool                `json:"WxAction"`
-	TaskNumber    int                 `json:"TaskNumber"`
-	DownNumber    int                 `json:"DownNumber"`
-	UserAgent     string              `json:"UserAgent"`
-	UseHeaders    string              `json:"UseHeaders"`
-	InsertTail    bool                `json:"InsertTail"`
-	BiliCookie    string              `json:"BiliCookie"` // B站Cookie，用于ASR识别
-	MimeMap       map[string]MimeInfo `json:"MimeMap"`
-	Rule          string              `json:"Rule"`
+	storage          *Storage
+	Theme            string              `json:"Theme"`
+	Locale           string              `json:"Locale"`
+	Host             string              `json:"Host"`
+	Port             string              `json:"Port"`
+	Quality          int                 `json:"Quality"`
+	SaveDirectory    string              `json:"SaveDirectory"`
+	FilenameLen      int                 `json:"FilenameLen"`
+	FilenameTime     bool                `json:"FilenameTime"`
+	UpstreamProxy    string              `json:"UpstreamProxy"`
+	OpenProxy        bool                `json:"OpenProxy"`
+	DownloadProxy    bool                `json:"DownloadProxy"`
+	AutoProxy        bool                `json:"AutoProxy"`
+	WxAction         bool                `json:"WxAction"`
+	TaskNumber       int                 `json:"TaskNumber"`
+	DownNumber       int                 `json:"DownNumber"`
+	UserAgent        string              `json:"UserAgent"`
+	UseHeaders       string              `json:"UseHeaders"`
+	InsertTail       bool                `json:"InsertTail"`
+	BiliCookie       string              `json:"BiliCookie"` // B站Cookie，用于ASR识别
+	CaptionKeepVideo bool                `json:"CaptionKeepVideo"`
+	CaptionKeepAudio bool                `json:"CaptionKeepAudio"`
+	MimeMap          map[string]MimeInfo `json:"MimeMap"`
+	Rule             string              `json:"Rule"`
 }
 
 var (
@@ -51,27 +53,29 @@ func initConfig() *Config {
 	}
 
 	defaultConfig := &Config{
-		Theme:         "lightTheme",
-		Locale:        "zh",
-		Host:          "127.0.0.1",
-		Port:          "8899",
-		Quality:       0,
-		SaveDirectory: getDefaultDownloadDir(),
-		FilenameLen:   0,
-		FilenameTime:  true,
-		UpstreamProxy: "",
-		OpenProxy:     false,
-		DownloadProxy: false,
-		AutoProxy:     false,
-		WxAction:      true,
-		TaskNumber:    runtime.NumCPU() * 2,
-		DownNumber:    3,
-		UserAgent:     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
-		UseHeaders:    "default",
-		InsertTail:    true,
-		BiliCookie:    "", // 默认为空，需要用户配置
-		MimeMap:       getDefaultMimeMap(),
-		Rule:          "*",
+		Theme:            "lightTheme",
+		Locale:           "zh",
+		Host:             "127.0.0.1",
+		Port:             "8899",
+		Quality:          0,
+		SaveDirectory:    getDefaultDownloadDir(),
+		FilenameLen:      0,
+		FilenameTime:     true,
+		UpstreamProxy:    "",
+		OpenProxy:        false,
+		DownloadProxy:    false,
+		AutoProxy:        false,
+		WxAction:         true,
+		TaskNumber:       runtime.NumCPU() * 2,
+		DownNumber:       3,
+		UserAgent:        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+		UseHeaders:       "default",
+		InsertTail:       true,
+		BiliCookie:       "", // 默认为空，需要用户配置
+		CaptionKeepVideo: false,
+		CaptionKeepAudio: false,
+		MimeMap:          getDefaultMimeMap(),
+		Rule:             "*",
 	}
 
 	rawDefaults, err := json.Marshal(defaultConfig)
@@ -231,6 +235,8 @@ func (c *Config) setConfig(config Config) {
 	c.UseHeaders = config.UseHeaders
 	c.InsertTail = config.InsertTail
 	c.BiliCookie = config.BiliCookie
+	c.CaptionKeepVideo = config.CaptionKeepVideo
+	c.CaptionKeepAudio = config.CaptionKeepAudio
 	c.Rule = config.Rule
 	if oldProxy != c.UpstreamProxy || openProxy != c.OpenProxy {
 		proxyOnce.setTransport()
@@ -293,6 +299,10 @@ func (c *Config) getConfig(key string) interface{} {
 		return c.InsertTail
 	case "BiliCookie":
 		return c.BiliCookie
+	case "CaptionKeepVideo":
+		return c.CaptionKeepVideo
+	case "CaptionKeepAudio":
+		return c.CaptionKeepAudio
 	case "MimeMap":
 		mimeMux.RLock()
 		defer mimeMux.RUnlock()

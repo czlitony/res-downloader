@@ -30,6 +30,8 @@ export namespace appType {
         UserAgent: string
         UseHeaders: string
         InsertTail: boolean
+        CaptionKeepVideo: boolean
+        CaptionKeepAudio: boolean
         MimeMap: { [key: string]: MimeMap }
         Rule: string
     }

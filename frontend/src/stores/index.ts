@@ -33,6 +33,8 @@ export const useIndexStore = defineStore("index-store", () => {
         UserAgent: "",
         UseHeaders: "",
         InsertTail: true,
+        CaptionKeepVideo: false,
+        CaptionKeepAudio: false,
         MimeMap: {},
         Rule: "*"
     })

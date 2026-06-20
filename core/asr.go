@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,23 +18,33 @@ import (
 )
 
 const (
-	API_REQ_UPLOAD    = "https://member.bilibili.com/x/bcut/rubick-interface/resource/create"
-	API_COMMIT_UPLOAD = "https://member.bilibili.com/x/bcut/rubick-interface/resource/create/complete"
-	API_CREATE_TASK   = "https://member.bilibili.com/x/bcut/rubick-interface/task"
-	API_QUERY_RESULT  = "https://member.bilibili.com/x/bcut/rubick-interface/task/result"
+	ASRMaxRetryAttempts = 3
+	ASRRetryBaseDelay   = time.Second
+	ASRCreateTaskDelay  = 1500 * time.Millisecond
+	ASRPollTransientMax = 8
+	ASRTaskMaxAttempts  = 3
+	ASRTaskRetryDelay   = 2 * time.Second
+	API_REQ_UPLOAD      = "https://member.bilibili.com/x/bcut/rubick-interface/resource/create"
+	API_COMMIT_UPLOAD   = "https://member.bilibili.com/x/bcut/rubick-interface/resource/create/complete"
+	API_CREATE_TASK     = "https://member.bilibili.com/x/bcut/rubick-interface/task"
+	API_QUERY_RESULT    = "https://member.bilibili.com/x/bcut/rubick-interface/task/result"
 )
 
 type BcutASR struct {
-	AudioPath   string
-	AudioFormat string // 实际音频格式: mp3, aac, wav, flac 等
-	ResourceID  string
-	DownloadURL string
-	TaskID      string
-	Cookie      string // B站Cookie，包含SESSDATA
-	UploadID    string // 上传ID
-	InBossKey   string // 上传密钥
-	Etags       []string // 分片ETag列表
-	client      *http.Client
+	AudioPath                       string
+	AudioFormat                     string // 实际音频格式: mp3, aac, wav, flac 等
+	TempAudioPath                   string // 提取视频时生成的临时音频路径
+	DeleteSourceAfterAudioExtracted bool
+	DeletedVideo                    bool
+	CleanupErrors                   []string
+	ResourceID                      string
+	DownloadURL                     string
+	TaskID                          string
+	Cookie                          string   // B站Cookie，包含SESSDATA
+	UploadID                        string   // 上传ID
+	InBossKey                       string   // 上传密钥
+	Etags                           []string // 分片ETag列表
+	client                          *http.Client
 }
 
 type ASRUtterance struct {
@@ -46,12 +57,23 @@ type ASRResult struct {
 	Utterances []ASRUtterance `json:"utterances"`
 }
 
+type asrTaskRetryableError struct {
+	reason string
+}
+
+func (err *asrTaskRetryableError) Error() string {
+	return err.reason
+}
+
+func isASRTaskRetryableError(err error) bool {
+	var retryableErr *asrTaskRetryableError
+	return errors.As(err, &retryableErr)
+}
+
 func NewBcutASR(audioPath string) *BcutASR {
 	return &BcutASR{
 		AudioPath: audioPath,
-		client: &http.Client{
-			Timeout: 60 * time.Second,
-		},
+		client:    &http.Client{},
 	}
 }
 
@@ -59,6 +81,24 @@ func NewBcutASR(audioPath string) *BcutASR {
 func (asr *BcutASR) setHeaders(req *http.Request) {
 	req.Header.Set("User-Agent", "Bilibili/1.0.0 (https://www.bilibili.com)")
 	req.Header.Set("Content-Type", "application/json")
+}
+
+func retryASRStep(step string, attempts int, fn func() error) error {
+	var lastErr error
+	for i := 1; i <= attempts; i++ {
+		if err := fn(); err != nil {
+			lastErr = err
+			if i < attempts {
+				delay := time.Duration(i) * ASRRetryBaseDelay
+				globalLogger.Warn().Err(err).Msgf("%s失败，%s后重试(%d/%d)", step, delay, i+1, attempts)
+				time.Sleep(delay)
+				continue
+			}
+			break
+		}
+		return nil
+	}
+	return lastErr
 }
 
 // Run 执行完整的ASR流程
@@ -77,6 +117,8 @@ func (asr *BcutASR) Run() (string, error) {
 		}
 		audioPath = extractedPath
 		asr.AudioFormat = audioFmt
+		asr.TempAudioPath = extractedPath
+		asr.deleteSourceAfterAudioExtracted()
 	} else {
 		// 原始就是音频文件，取扩展名（去掉点号）
 		asr.AudioFormat = strings.TrimPrefix(ext, ".")
@@ -90,25 +132,29 @@ func (asr *BcutASR) Run() (string, error) {
 		return "", fmt.Errorf("上传失败: %v", err)
 	}
 
-	// 2. 创建识别任务
-	globalLogger.Info().Msg("步骤2: 创建识别任务, ResourceID: " + asr.ResourceID)
-	if err := asr.createTask(); err != nil {
-		globalLogger.Err(err)
-		return "", fmt.Errorf("创建任务失败: %v", err)
-	}
-
-	// 3. 轮询查询结果
-	globalLogger.Info().Msg("步骤3: 查询结果, TaskID: " + asr.TaskID)
-	result, err := asr.pollResult()
+	// 2-3. 创建识别任务并轮询查询结果。遇到服务端任务同步异常时，复用已上传音频重建任务。
+	result, err := asr.recognizeUploadedAudio()
 	if err != nil {
 		globalLogger.Err(err)
-		return "", fmt.Errorf("查询结果失败: %v", err)
+		return "", err
 	}
 
 	// 4. 转换为纯文本
 	text := asr.toText(result)
 	globalLogger.Info().Msgf("ASR识别完成, 文本长度: %d", len(text))
 	return text, nil
+}
+
+func (asr *BcutASR) deleteSourceAfterAudioExtracted() {
+	if !asr.DeleteSourceAfterAudioExtracted || asr.TempAudioPath == "" {
+		return
+	}
+	if err := os.Remove(asr.AudioPath); err != nil && !os.IsNotExist(err) {
+		asr.CleanupErrors = append(asr.CleanupErrors, "删除视频失败: "+err.Error())
+		return
+	}
+	asr.DeletedVideo = true
+	globalLogger.Info().Msg("音频提取成功，已删除源视频: " + asr.AudioPath)
 }
 
 // videoToAudio 从视频中提取音频（使用ffmpeg）
@@ -121,7 +167,7 @@ func videoToAudio(inputPath string) (string, string, error) {
 
 	globalLogger.Info().Msgf("使用 ffmpeg: %s", ffmpegPath)
 
-	// 输出为 mp3 格式（兼容性最好，B站ASR支持）
+	// 输出为更适合语音识别和上传的 mp3 格式
 	outputPath := strings.TrimSuffix(inputPath, filepath.Ext(inputPath)) + "_temp.mp3"
 	audioFormat := "mp3"
 
@@ -130,17 +176,17 @@ func videoToAudio(inputPath string) (string, string, error) {
 	// -i: 输入文件
 	// -vn: 不处理视频
 	// -acodec libmp3lame: 使用 mp3 编码器
-	// -ab 128k: 比特率 128kbps
-	// -ar 44100: 采样率 44100Hz
-	// -ac 2: 双声道
+	// -ab 64k: 语音场景足够，文件更小
+	// -ar 16000: 语音识别常用采样率
+	// -ac 1: 单声道
 	args := []string{
 		"-y",
 		"-i", inputPath,
 		"-vn",
 		"-acodec", "libmp3lame",
-		"-ab", "128k",
-		"-ar", "44100",
-		"-ac", "2",
+		"-ab", "64k",
+		"-ar", "16000",
+		"-ac", "1",
 		outputPath,
 	}
 
@@ -222,19 +268,6 @@ func (asr *BcutASR) upload() error {
 	formValues.Set("resource_file_type", audioFmt)
 	formValues.Set("model_id", "7")
 	globalLogger.Info().Msgf("请求上传, body: %s", formValues.Encode())
-	req, err := http.NewRequest("POST", API_REQ_UPLOAD, strings.NewReader(formValues.Encode()))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("User-Agent", "Bilibili/1.0.0 (https://www.bilibili.com)")
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := asr.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
 	var uploadResp struct {
 		Code int `json:"code"`
 		Data struct {
@@ -246,14 +279,37 @@ func (asr *BcutASR) upload() error {
 			InBossKey     string   `json:"in_boss_key"`
 		} `json:"data"`
 	}
+	err = retryASRStep("请求上传", ASRMaxRetryAttempts, func() error {
+		req, err := http.NewRequest("POST", API_REQ_UPLOAD, strings.NewReader(formValues.Encode()))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("User-Agent", "Bilibili/1.0.0 (https://www.bilibili.com)")
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	if err := json.NewDecoder(resp.Body).Decode(&uploadResp); err != nil {
+		resp, err := asr.client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode >= 400 {
+			return fmt.Errorf("请求上传失败, status: %d, response: %s", resp.StatusCode, string(respBody))
+		}
+		if err := json.Unmarshal(respBody, &uploadResp); err != nil {
+			return fmt.Errorf("解析请求上传响应失败: %v, body: %s", err, string(respBody))
+		}
+		if uploadResp.Code != 0 {
+			return fmt.Errorf("请求上传失败, code: %d, response: %s", uploadResp.Code, string(respBody))
+		}
+		return nil
+	})
+	if err != nil {
 		return err
-	}
-
-	if uploadResp.Code != 0 {
-		bodyBytes, _ := json.Marshal(uploadResp)
-		return fmt.Errorf("请求上传失败, code: %d, response: %s", uploadResp.Code, string(bodyBytes))
 	}
 
 	asr.ResourceID = uploadResp.Data.ResourceID
@@ -267,7 +323,7 @@ func (asr *BcutASR) upload() error {
 
 	// 2. 分片上传文件内容（与AsrTools一致：按per_size分片，每片一个URL）
 	asr.Etags = []string{}
-	uploadClient := &http.Client{Timeout: 300 * time.Second}
+	uploadClient := &http.Client{}
 
 	for i, uploadURL := range uploadResp.Data.UploadURLs {
 		// 计算当前分片的数据范围
@@ -280,29 +336,34 @@ func (asr *BcutASR) upload() error {
 
 		globalLogger.Info().Msgf("上传分片 %d/%d, 大小: %d bytes", i+1, len(uploadResp.Data.UploadURLs), len(chunk))
 
-		uploadReq, err := http.NewRequest("PUT", uploadURL, bytes.NewReader(chunk))
+		var etag string
+		err := retryASRStep(fmt.Sprintf("上传分片 %d/%d", i+1, len(uploadResp.Data.UploadURLs)), ASRMaxRetryAttempts, func() error {
+			uploadReq, err := http.NewRequest("PUT", uploadURL, bytes.NewReader(chunk))
+			if err != nil {
+				return fmt.Errorf("创建分片上传请求失败: %v", err)
+			}
+
+			uploadHttpResp, err := uploadClient.Do(uploadReq)
+			if err != nil {
+				return fmt.Errorf("上传分片 %d 失败: %v", i+1, err)
+			}
+			defer uploadHttpResp.Body.Close()
+
+			if uploadHttpResp.StatusCode != 200 && uploadHttpResp.StatusCode != 201 {
+				respBody, _ := io.ReadAll(uploadHttpResp.Body)
+				return fmt.Errorf("上传分片 %d 失败, status: %d, response: %s", i+1, uploadHttpResp.StatusCode, string(respBody))
+			}
+
+			etag = uploadHttpResp.Header.Get("Etag")
+			if etag == "" {
+				etag = uploadHttpResp.Header.Get("ETag")
+			}
+			return nil
+		})
 		if err != nil {
-			return fmt.Errorf("创建分片上传请求失败: %v", err)
-		}
-
-		uploadHttpResp, err := uploadClient.Do(uploadReq)
-		if err != nil {
-			return fmt.Errorf("上传分片 %d 失败: %v", i+1, err)
-		}
-
-		if uploadHttpResp.StatusCode != 200 && uploadHttpResp.StatusCode != 201 {
-			respBody, _ := io.ReadAll(uploadHttpResp.Body)
-			uploadHttpResp.Body.Close()
-			return fmt.Errorf("上传分片 %d 失败, status: %d, response: %s", i+1, uploadHttpResp.StatusCode, string(respBody))
-		}
-
-		// 获取ETag
-		etag := uploadHttpResp.Header.Get("Etag")
-		if etag == "" {
-			etag = uploadHttpResp.Header.Get("ETag")
+			return err
 		}
 		asr.Etags = append(asr.Etags, etag)
-		uploadHttpResp.Body.Close()
 
 		globalLogger.Info().Msgf("分片 %d 上传成功, ETag: %s", i+1, etag)
 	}
@@ -315,26 +376,6 @@ func (asr *BcutASR) upload() error {
 	commitValues.Set("upload_id", asr.UploadID)
 	commitValues.Set("model_id", "7")
 	globalLogger.Info().Msgf("提交上传, body: %s", commitValues.Encode())
-	commitReq, err := http.NewRequest("POST", API_COMMIT_UPLOAD, strings.NewReader(commitValues.Encode()))
-	if err != nil {
-		return err
-	}
-	commitReq.Header.Set("User-Agent", "Bilibili/1.0.0 (https://www.bilibili.com)")
-	commitReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	commitResp, err := asr.client.Do(commitReq)
-	if err != nil {
-		return err
-	}
-	defer commitResp.Body.Close()
-
-	// 读取完整响应体用于解析和调试
-	commitRespBody, err := io.ReadAll(commitResp.Body)
-	if err != nil {
-		return fmt.Errorf("读取提交上传响应失败: %v", err)
-	}
-	globalLogger.Info().Msgf("提交上传响应: %s", string(commitRespBody))
-
 	var commitResult struct {
 		Code int `json:"code"`
 		Data struct {
@@ -342,11 +383,39 @@ func (asr *BcutASR) upload() error {
 			ResourceID  string `json:"resource_id"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(commitRespBody, &commitResult); err != nil {
-		return fmt.Errorf("解析提交上传响应失败: %v", err)
-	}
-	if commitResult.Code != 0 {
-		return fmt.Errorf("提交上传失败, code: %d, response: %s", commitResult.Code, string(commitRespBody))
+	var commitRespBody []byte
+	err = retryASRStep("提交上传", ASRMaxRetryAttempts, func() error {
+		commitReq, err := http.NewRequest("POST", API_COMMIT_UPLOAD, strings.NewReader(commitValues.Encode()))
+		if err != nil {
+			return err
+		}
+		commitReq.Header.Set("User-Agent", "Bilibili/1.0.0 (https://www.bilibili.com)")
+		commitReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+		commitResp, err := asr.client.Do(commitReq)
+		if err != nil {
+			return err
+		}
+		defer commitResp.Body.Close()
+
+		commitRespBody, err = io.ReadAll(commitResp.Body)
+		if err != nil {
+			return fmt.Errorf("读取提交上传响应失败: %v", err)
+		}
+		globalLogger.Info().Msgf("提交上传响应: %s", string(commitRespBody))
+		if commitResp.StatusCode >= 400 {
+			return fmt.Errorf("提交上传失败, status: %d, response: %s", commitResp.StatusCode, string(commitRespBody))
+		}
+		if err := json.Unmarshal(commitRespBody, &commitResult); err != nil {
+			return fmt.Errorf("解析提交上传响应失败: %v", err)
+		}
+		if commitResult.Code != 0 {
+			return fmt.Errorf("提交上传失败, code: %d, response: %s", commitResult.Code, string(commitRespBody))
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 	// 使用commit返回的download_url（这是最终的URL）
 	if commitResult.Data.DownloadURL != "" {
@@ -355,6 +424,41 @@ func (asr *BcutASR) upload() error {
 
 	globalLogger.Info().Msgf("上传完成, DownloadURL: %s", asr.DownloadURL)
 	return nil
+}
+
+// recognizeUploadedAudio 创建识别任务并查询结果。部分 B 站 ASR 任务会短暂返回无效 task_id，重建任务通常可恢复。
+func (asr *BcutASR) recognizeUploadedAudio() (*ASRResult, error) {
+	var lastErr error
+	for attempt := 1; attempt <= ASRTaskMaxAttempts; attempt++ {
+		if attempt == 1 {
+			globalLogger.Info().Msgf("上传完成后等待 %s 再创建识别任务", ASRCreateTaskDelay)
+		} else {
+			delay := time.Duration(attempt-1) * ASRTaskRetryDelay
+			globalLogger.Warn().Err(lastErr).Msgf("ASR任务异常，%s后重新创建识别任务(%d/%d)", delay, attempt, ASRTaskMaxAttempts)
+			time.Sleep(delay)
+		}
+		time.Sleep(ASRCreateTaskDelay)
+
+		globalLogger.Info().Msgf("步骤2: 创建识别任务, ResourceID: %s, attempt=%d/%d", asr.ResourceID, attempt, ASRTaskMaxAttempts)
+		if err := asr.createTask(); err != nil {
+			lastErr = fmt.Errorf("创建任务失败: %v", err)
+			if attempt < ASRTaskMaxAttempts {
+				continue
+			}
+			return nil, lastErr
+		}
+
+		globalLogger.Info().Msg("步骤3: 查询结果, TaskID: " + asr.TaskID)
+		result, err := asr.pollResult()
+		if err == nil {
+			return result, nil
+		}
+		lastErr = fmt.Errorf("查询结果失败: %v", err)
+		if !isASRTaskRetryableError(err) || attempt == ASRTaskMaxAttempts {
+			return nil, lastErr
+		}
+	}
+	return nil, lastErr
 }
 
 // createTask 创建识别任务
@@ -366,25 +470,6 @@ func (asr *BcutASR) createTask() error {
 
 	taskBody, _ := json.Marshal(taskData)
 	globalLogger.Info().Msgf("创建任务请求, body: %s", string(taskBody))
-	req, err := http.NewRequest("POST", API_CREATE_TASK, bytes.NewBuffer(taskBody))
-	if err != nil {
-		return err
-	}
-	asr.setHeaders(req)
-
-	resp, err := asr.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	// 读取完整响应体用于调试
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("读取创建任务响应失败: %v", err)
-	}
-	globalLogger.Info().Msgf("创建任务响应: %s", string(respBody))
-
 	var taskResp struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
@@ -392,13 +477,37 @@ func (asr *BcutASR) createTask() error {
 			TaskID string `json:"task_id"`
 		} `json:"data"`
 	}
+	err := retryASRStep("创建识别任务", ASRMaxRetryAttempts, func() error {
+		req, err := http.NewRequest("POST", API_CREATE_TASK, bytes.NewBuffer(taskBody))
+		if err != nil {
+			return err
+		}
+		asr.setHeaders(req)
 
-	if err := json.Unmarshal(respBody, &taskResp); err != nil {
-		return fmt.Errorf("解析创建任务响应失败: %v, body: %s", err, string(respBody))
-	}
+		resp, err := asr.client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
 
-	if taskResp.Code != 0 {
-		return fmt.Errorf("创建任务失败, code: %d, message: %s, response: %s", taskResp.Code, taskResp.Message, string(respBody))
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("读取创建任务响应失败: %v", err)
+		}
+		globalLogger.Info().Msgf("创建任务响应: %s", string(respBody))
+		if resp.StatusCode >= 400 {
+			return fmt.Errorf("创建任务失败, status: %d, response: %s", resp.StatusCode, string(respBody))
+		}
+		if err := json.Unmarshal(respBody, &taskResp); err != nil {
+			return fmt.Errorf("解析创建任务响应失败: %v, body: %s", err, string(respBody))
+		}
+		if taskResp.Code != 0 {
+			return fmt.Errorf("创建任务失败, code: %d, message: %s, response: %s", taskResp.Code, taskResp.Message, string(respBody))
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 
 	asr.TaskID = taskResp.Data.TaskID
@@ -408,6 +517,7 @@ func (asr *BcutASR) createTask() error {
 
 // pollResult 轮询查询结果
 func (asr *BcutASR) pollResult() (*ASRResult, error) {
+	transientErrors := 0
 	for i := 0; i < 500; i++ {
 		req, err := http.NewRequest("GET", fmt.Sprintf("%s?model_id=7&task_id=%s", API_QUERY_RESULT, asr.TaskID), nil)
 		if err != nil {
@@ -417,13 +527,25 @@ func (asr *BcutASR) pollResult() (*ASRResult, error) {
 
 		resp, err := asr.client.Do(req)
 		if err != nil {
-			return nil, err
+			transientErrors++
+			if transientErrors > ASRPollTransientMax {
+				return nil, fmt.Errorf("查询结果失败: %v", err)
+			}
+			globalLogger.Warn().Err(err).Msgf("查询结果临时失败，继续轮询(%d/%d)", transientErrors, ASRPollTransientMax)
+			time.Sleep(1 * time.Second)
+			continue
 		}
 
 		respBody, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
-			return nil, err
+			transientErrors++
+			if transientErrors > ASRPollTransientMax {
+				return nil, err
+			}
+			globalLogger.Warn().Err(err).Msgf("读取查询响应临时失败，继续轮询(%d/%d)", transientErrors, ASRPollTransientMax)
+			time.Sleep(1 * time.Second)
+			continue
 		}
 
 		var resultResp struct {
@@ -437,13 +559,26 @@ func (asr *BcutASR) pollResult() (*ASRResult, error) {
 		}
 
 		if err := json.Unmarshal(respBody, &resultResp); err != nil {
-			return nil, fmt.Errorf("解析查询响应失败: %v, body: %s", err, string(respBody))
+			transientErrors++
+			if transientErrors > ASRPollTransientMax {
+				return nil, fmt.Errorf("解析查询响应失败: %v, body: %s", err, string(respBody))
+			}
+			globalLogger.Warn().Err(err).Msgf("解析查询响应临时失败，继续轮询(%d/%d), body: %s", transientErrors, ASRPollTransientMax, string(respBody))
+			time.Sleep(1 * time.Second)
+			continue
 		}
 
 		if resultResp.Code != 0 {
-			return nil, fmt.Errorf("查询结果失败, code: %d, message: %s", resultResp.Code, resultResp.Message)
+			transientErrors++
+			if transientErrors > ASRPollTransientMax {
+				return nil, &asrTaskRetryableError{reason: fmt.Sprintf("查询结果失败, code: %d, message: %s", resultResp.Code, resultResp.Message)}
+			}
+			globalLogger.Warn().Msgf("查询结果临时异常，继续轮询(%d/%d), code=%d, message=%s", transientErrors, ASRPollTransientMax, resultResp.Code, resultResp.Message)
+			time.Sleep(1 * time.Second)
+			continue
 		}
 
+		transientErrors = 0
 		globalLogger.Info().Msgf("查询状态: state=%d, remark=%s", resultResp.Data.State, resultResp.Data.Remark)
 
 		// state: 0=停止, 1=运行中, 3=错误, 4=完成
@@ -455,11 +590,14 @@ func (asr *BcutASR) pollResult() (*ASRResult, error) {
 			}
 			return &asrResult, nil
 		case 3: // 错误
+			if strings.TrimSpace(resultResp.Data.Remark) == "" {
+				return nil, &asrTaskRetryableError{reason: "ASR识别失败: state=3, remark为空"}
+			}
 			return nil, fmt.Errorf("ASR识别失败: %s", resultResp.Data.Remark)
 		}
 
-		// 等待3秒后继续查询（避免过于频繁）
-		time.Sleep(3 * time.Second)
+		// 与 AsrTools 保持一致：每秒查询一次，最多 500 次
+		time.Sleep(1 * time.Second)
 	}
 
 	return nil, fmt.Errorf("查询超时")

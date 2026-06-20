@@ -135,20 +135,36 @@ func GetUniqueFileName(filePath string) string {
 
 func OpenFolder(filePath string) error {
 	var cmd *exec.Cmd
+	isDir := false
+	if info, err := os.Stat(filePath); err == nil {
+		isDir = info.IsDir()
+	}
 
 	switch sysRuntime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", "-R", filePath)
+		if isDir {
+			cmd = exec.Command("open", filePath)
+		} else {
+			cmd = exec.Command("open", "-R", filePath)
+		}
 	case "windows":
-		cmd = exec.Command("explorer", "/select,", filePath)
+		if isDir {
+			cmd = exec.Command("explorer", filePath)
+		} else {
+			cmd = exec.Command("explorer", "/select,", filePath)
+		}
 	case "linux":
-		cmd = exec.Command("nautilus", filePath)
+		targetPath := filePath
+		if !isDir {
+			targetPath = filepath.Dir(filePath)
+		}
+		cmd = exec.Command("nautilus", targetPath)
 		if err := cmd.Start(); err != nil {
-			cmd = exec.Command("thunar", filePath)
+			cmd = exec.Command("thunar", targetPath)
 			if err := cmd.Start(); err != nil {
-				cmd = exec.Command("dolphin", filePath)
+				cmd = exec.Command("dolphin", targetPath)
 				if err := cmd.Start(); err != nil {
-					cmd = exec.Command("pcmanfm", filePath)
+					cmd = exec.Command("pcmanfm", targetPath)
 					if err := cmd.Start(); err != nil {
 						return err
 					}

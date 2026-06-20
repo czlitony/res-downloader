@@ -1,117 +1,156 @@
 <template>
   <div class="h-full flex flex-col px-5 pt-5 overflow-y-auto [&::-webkit-scrollbar]:hidden">
-    <div class="pb-2 z-40" id="header">
-      <NSpace>
-        <NButton v-if="isProxy" secondary type="primary" @click.stop="close" style="--wails-draggable:no-drag">
-          <span class="inline-block w-1.5 h-1.5 bg-red-600 rounded-full mr-1 animate-pulse"></span>
-          {{ t("index.close_grab") }}{{ data.length > 0 ? `&nbsp;${t('index.total_resources', {count: data.length})}` : '' }}
-        </NButton>
-        <NButton v-else tertiary type="tertiary" @click.stop="open" style="--wails-draggable:no-drag">
-          {{ t("index.open_grab") }}{{ data.length > 0 ? `&nbsp;${t('index.total_resources', {count: data.length})}` : '' }}
-        </NButton>
-        <NSelect style="min-width: 100px;--wails-draggable:no-drag" :placeholder="t('index.grab_type')" v-model:value="resourcesType" multiple clearable
-                 :max-tag-count="3" :options="classify"></NSelect>
-        <NButtonGroup style="--wails-draggable:no-drag">
+    <div class="pb-3 z-40 space-y-2" id="header" style="--wails-draggable:no-drag">
+      <div class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
+        <div
+            class="inline-flex h-10 shrink-0 items-center gap-2 rounded-md border px-3 shadow-sm transition-colors"
+            :class="isProxy ? 'border-green-200 bg-green-50' : 'border-gray-200 bg-white'"
+        >
+          <NSwitch size="medium" :value="isProxy" @update:value="toggleProxy" />
+          <span class="inline-flex items-center gap-1.5 whitespace-nowrap text-sm font-medium" :class="isProxy ? 'text-green-700' : 'text-gray-800'">
+            <span v-if="isProxy" class="inline-block h-1.5 w-1.5 rounded-full bg-green-600 animate-pulse"></span>
+            {{ isProxy ? t("index.grabbing") : t("index.open_grab") }}
+          </span>
+          <span v-if="data.length > 0" class="rounded-full bg-gray-100 px-2 py-0.5 text-xs font-semibold text-gray-600">{{ data.length }}</span>
+        </div>
 
-          <NButton v-if="rememberChoice" tertiary type="error" @click.stop="clear" style="--wails-draggable:no-drag">
-            <template #icon>
-              <n-icon>
-                <TrashOutline/>
-              </n-icon>
-            </template>
-            {{ t("index.clear_list") }}
-          </NButton>
-          <n-popconfirm
-              v-else
-              @positive-click="()=>{rememberChoice=rememberChoiceTmp;clear()}"
-              :show-icon="false"
+        <div class="flex min-w-0 flex-[0_1_auto] flex-wrap items-center gap-x-3 gap-y-2">
+          <span class="mr-1 whitespace-nowrap text-sm text-gray-500">{{ t('index.grab_type') }}</span>
+          <NCheckbox
+              v-for="item in visibleClassify"
+              :key="item.value"
+              :checked="isResourceTypeActive(item.value)"
+              @update:checked="(checked: boolean) => updateResourceType(item.value, checked)"
           >
+            {{ getClassifyLabel(item) }}
+          </NCheckbox>
+          <NPopover v-if="moreClassify.length > 0" placement="bottom-start" trigger="click">
             <template #trigger>
-              <NButton tertiary type="error" style="--wails-draggable:no-drag">
-                <template #icon>
-                  <n-icon>
-                    <TrashOutline/>
-                  </n-icon>
-                </template>
-                {{ t("index.clear_list") }}
+              <NButton size="small" quaternary>
+                {{ t('index.more_types') }}{{ selectedMoreClassifyCount > 0 ? `(${selectedMoreClassifyCount})` : '' }}
               </NButton>
             </template>
-            <div>
-              <div class="flex flex-row items-center text-red-700 my-2 text-base">
-                <n-icon>
-                  <TrashOutline/>
-                </n-icon>
-                <p class="ml-1">{{ t("index.clear_list_tip") }}</p>
-              </div>
+            <div class="grid min-w-[180px] grid-cols-2 gap-x-4 gap-y-2 p-1">
               <NCheckbox
-                  v-model:checked="rememberChoiceTmp"
+                  v-for="item in moreClassify"
+                  :key="item.value"
+                  :checked="isResourceTypeActive(item.value)"
+                  @update:checked="(checked: boolean) => updateResourceType(item.value, checked)"
               >
-                <span class="text-gray-400">{{ t('index.remember_clear_choice') }}</span>
+                {{ getClassifyLabel(item) }}
               </NCheckbox>
             </div>
-          </n-popconfirm>
+          </NPopover>
+        </div>
 
-          <NButton tertiary type="primary" @click.stop="batchDown">
+        <div class="ml-auto flex min-w-[360px] flex-[1_1_360px] items-center gap-1">
+          <span class="whitespace-nowrap text-sm text-gray-500">{{ t('setting.save_dir') }}</span>
+          <div
+              class="flex h-8 min-w-0 flex-1 items-center rounded border border-gray-200 bg-white px-2 text-sm text-gray-800"
+              :title="store.globalConfig.SaveDirectory"
+          >
+            <span
+                v-if="store.globalConfig.SaveDirectory"
+                class="block min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-left [direction:rtl] [unicode-bidi:plaintext]"
+            >{{ store.globalConfig.SaveDirectory }}</span>
+            <span v-else class="text-gray-400">{{ t('index.save_path_empty') }}</span>
+          </div>
+          <NButton size="small" @click.stop="selectDownloadDir">
             <template #icon>
-              <n-icon>
-                <DownloadOutline/>
-              </n-icon>
+              <n-icon><FolderOpenOutline/></n-icon>
             </template>
-            {{ t('index.batch_download') }}
+            {{ t('common.select') }}
           </NButton>
-          <NButton tertiary type="primary" @click.stop="batchExtractCaption">
+          <NButton size="small" @click.stop="openSaveDirectory">
             <template #icon>
-              <n-icon>
-                <DocumentTextOutline/>
-              </n-icon>
+              <n-icon><OpenOutline/></n-icon>
             </template>
-            {{ t('index.batch_extract_caption') }}
+            {{ t('index.open_save_dir') }}
           </NButton>
-          <NButton tertiary type="info">
-            <NPopover placement="bottom" trigger="hover">
-              <template #trigger>
-                <NIcon size="18" class="">
-                  <Apps/>
-                </NIcon>
+        </div>
+      </div>
+
+      <div class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
+        <NButton quaternary type="primary" @click.stop="batchExtractCaption">
+          <template #icon>
+            <n-icon><DocumentTextOutline/></n-icon>
+          </template>
+          {{ t('index.batch_extract_caption') }}
+        </NButton>
+        <NButton quaternary type="primary" @click.stop="batchDown">
+          <template #icon>
+            <n-icon><DownloadOutline/></n-icon>
+          </template>
+          {{ t('index.batch_download') }}
+        </NButton>
+        <NButton quaternary type="error" @click.stop="batchCancel">
+          <template #icon>
+            <n-icon><CloseOutline/></n-icon>
+          </template>
+          {{ t('index.cancel_down') }}
+        </NButton>
+
+        <NButton v-if="rememberChoice" quaternary type="error" @click.stop="clear">
+          <template #icon>
+            <n-icon><TrashOutline/></n-icon>
+          </template>
+          {{ t("index.clear_list") }}
+        </NButton>
+        <n-popconfirm
+            v-else
+            @positive-click="()=>{rememberChoice=rememberChoiceTmp;clear()}"
+            :show-icon="false"
+        >
+          <template #trigger>
+            <NButton quaternary type="error" @click="selectClearableRows">
+              <template #icon>
+                <n-icon><TrashOutline/></n-icon>
               </template>
-              <div class="flex flex-col">
-                <NButton tertiary type="error" @click.stop="batchCancel" class="my-1">
-                  <template #icon>
-                    <n-icon>
-                      <CloseOutline/>
-                    </n-icon>
-                  </template>
-                  {{ t('index.cancel_down') }}
-                </NButton>
-                <NButton tertiary type="warning" @click.stop="batchExport()" class="my-1">
-                  <template #icon>
-                    <n-icon>
-                      <ArrowRedoCircleOutline/>
-                    </n-icon>
-                  </template>
-                  {{ t('index.batch_export') }}
-                </NButton>
-                <NButton tertiary type="info" @click.stop="showImport=true" class="my-1">
-                  <template #icon>
-                    <n-icon>
-                      <ServerOutline/>
-                    </n-icon>
-                  </template>
-                  {{ t('index.batch_import') }}
-                </NButton>
-                <NButton tertiary type="primary" @click.stop="batchExport('url')" class="my-1">
-                  <template #icon>
-                    <n-icon>
-                      <ArrowRedoCircleOutline/>
-                    </n-icon>
-                  </template>
-                  {{ t('index.export_url') }}
-                </NButton>
-              </div>
-            </NPopover>
-          </NButton>
-        </NButtonGroup>
-      </NSpace>
+              {{ t("index.clear_list") }}
+            </NButton>
+          </template>
+          <div>
+            <div class="flex flex-row items-center text-red-700 my-2 text-base">
+              <n-icon><TrashOutline/></n-icon>
+              <p class="ml-1">{{ t("index.clear_list_tip") }}</p>
+            </div>
+            <NCheckbox v-model:checked="rememberChoiceTmp">
+              <span class="text-gray-400">{{ t('index.remember_clear_choice') }}</span>
+            </NCheckbox>
+          </div>
+        </n-popconfirm>
+
+        <NPopover placement="bottom" trigger="hover">
+          <template #trigger>
+            <NButton quaternary type="info">
+              <template #icon>
+                <NIcon><Apps/></NIcon>
+              </template>
+              {{ t('index.more_operation') }}
+            </NButton>
+          </template>
+          <div class="flex min-w-[150px] flex-col gap-1">
+            <NButton tertiary type="warning" @click.stop="batchExport()">
+              <template #icon>
+                <n-icon><ArrowRedoCircleOutline/></n-icon>
+              </template>
+              {{ t('index.batch_export') }}
+            </NButton>
+            <NButton tertiary type="info" @click.stop="showImport=true">
+              <template #icon>
+                <n-icon><ServerOutline/></n-icon>
+              </template>
+              {{ t('index.batch_import') }}
+            </NButton>
+            <NButton tertiary type="primary" @click.stop="batchExport('url')">
+              <template #icon>
+                <n-icon><ArrowRedoCircleOutline/></n-icon>
+              </template>
+              {{ t('index.export_url') }}
+            </NButton>
+          </div>
+        </NPopover>
+      </div>
     </div>
     <div class="flex-1">
       <NDataTable
@@ -143,7 +182,7 @@
 </template>
 
 <script lang="ts" setup>
-import {NButton, NIcon, NImage, NInput, NSpace, NTooltip, NPopover, NGradientText} from "naive-ui"
+import {NButton, NIcon, NImage, NInput, NSwitch, NTooltip, NPopover, NGradientText} from "naive-ui"
 import {computed, h, onMounted, ref, watch} from "vue"
 import type {appType} from "@/types/app"
 import type {DataTableRowKey, ImageRenderToolbarProps, DataTableFilterState, DataTableBaseColumn} from "naive-ui"
@@ -168,7 +207,9 @@ import {
   SearchOutline,
   Apps,
   TrashOutline, CloseOutline,
-  DocumentTextOutline
+  DocumentTextOutline,
+  FolderOpenOutline,
+  OpenOutline
 } from "@vicons/ionicons5"
 import {useDialog} from 'naive-ui'
 import * as bind from "../../wailsjs/go/core/Bind"
@@ -207,7 +248,8 @@ const filteredData = computed(() => {
 
 const store = useIndexStore()
 const tableHeight = ref(800)
-const resourcesType = ref<string[]>(["all"])
+const defaultResourceTypes = ["video", "m3u8"]
+const resourcesType = ref<string[]>([...defaultResourceTypes])
 
 const classifyAlias: { [key: string]: any } = {
   image: computed(() => t("index.image")),
@@ -240,17 +282,95 @@ const maxConcurrentDownloads = computed(() => {
   return store.globalConfig.DownNumber
 })
 
-const classify = ref([
-  {
-    value: "all",
-    label: computed(() => t("index.all")),
-  },
-])
+const defaultClassifyTypes = ["video", "m3u8", "audio", "live", "image", "stream", "xls", "doc", "pdf", "font"]
+const visibleClassifyTypes = ["video", "m3u8", "audio", "image"]
+const buildClassifyOptions = (types: string[]) => [
+  {value: "all", label: computed(() => t("index.all"))},
+  ...types.map(type => ({
+    value: type,
+    label: classifyAlias[type] ?? type,
+  })),
+]
+
+const classify = ref(buildClassifyOptions(defaultClassifyTypes))
+const visibleClassify = computed(() => {
+  return visibleClassifyTypes.reduce<any[]>((result, type) => {
+    const item = classify.value.find(item => item.value === type)
+    if (item) {
+      result.push(item)
+    }
+    return result
+  }, [])
+})
+const moreClassify = computed(() => {
+  return classify.value.filter(item => item.value !== "all" && !visibleClassifyTypes.includes(item.value))
+})
+const selectedMoreClassifyCount = computed(() => {
+  return moreClassify.value.filter(item => isResourceTypeActive(item.value)).length
+})
 
 const descriptionSearchValue = ref("")
 const urlSearchValue = ref("")
 const rememberChoice = ref(false)
 const rememberChoiceTmp = ref(false)
+
+const getClassifyLabel = (item: any) => {
+  return item?.label?.value ?? item?.label ?? item?.value
+}
+
+const isResourceTypeActive = (type: string) => {
+  return resourcesType.value.includes(type)
+}
+
+const normalizeResourceTypes = (types: unknown) => {
+  const savedTypes = Array.isArray(types) ? types.filter((item): item is string => typeof item === "string") : []
+  if (savedTypes.includes("all")) {
+    return [...defaultResourceTypes]
+  }
+  return Array.from(new Set([...defaultResourceTypes, ...savedTypes]))
+}
+
+const updateResourceType = (type: string, checked: boolean) => {
+  if (type === "all") {
+    resourcesType.value = checked ? ["all"] : [...defaultResourceTypes]
+    return
+  }
+
+  const next = resourcesType.value.filter(item => item !== "all" && item !== type)
+  if (checked) {
+    next.push(type)
+  }
+  resourcesType.value = next.length > 0 ? next : [...defaultResourceTypes]
+}
+
+const selectDownloadDir = () => {
+  appApi.openDirectoryDialog().then((res: appType.Res) => {
+    if (res.code === 1 && res.data?.folder) {
+      store.setConfig({SaveDirectory: res.data.folder})
+    }
+  }).catch((err: any) => {
+    window?.$message?.error(err?.message || String(err))
+  })
+}
+
+const openSaveDirectory = () => {
+  if (!store.globalConfig.SaveDirectory) {
+    window?.$message?.error(t("index.save_path_empty"))
+    return
+  }
+  appApi.openFolder({filePath: store.globalConfig.SaveDirectory})
+}
+
+const getDisplaySavePath = (row: appType.MediaInfo) => {
+  if (row.Status === "extract_done" && row.CaptionPath) {
+    return row.CaptionPath
+  }
+  return row.SavePath
+}
+
+const canOpenDisplaySavePath = (row: appType.MediaInfo) => {
+  return ["done", "extract_done"].includes(row.Status) && !!getDisplaySavePath(row)
+}
 
 const columns = ref<any[]>([
   {
@@ -385,13 +505,12 @@ const columns = ref<any[]>([
             type: status as any,
             size: "small",
             style: {
-              margin: "2px"
+              margin: "2px",
+              color: row.Status === "extract_error" ? "#d03050" : undefined
             },
             onClick: () => {
-              if (row.Status === "extract_done" && row.CaptionPath) {
-                appApi.openFolder({filePath: row.CaptionPath})
-              } else if (row.SavePath && row.Status === "done") {
-                appApi.openFolder({filePath: row.SavePath})
+              if (canOpenDisplaySavePath(row)) {
+                appApi.openFolder({filePath: getDisplaySavePath(row)})
               } else if (row.Status === "ready") {
                 download(row, index)
               }
@@ -464,12 +583,12 @@ const columns = ref<any[]>([
               color: "#5a95d0"
             },
             onClick: () => {
-              if (row.SavePath && row.Status === "done") {
-                appApi.openFolder({filePath: row.SavePath})
+              if (canOpenDisplaySavePath(row)) {
+                appApi.openFolder({filePath: getDisplaySavePath(row)})
               }
             }
           },
-          row.Status === "running" ? "" : row.SavePath
+          row.Status === "running" ? "" : getDisplaySavePath(row)
       )
     }
   },
@@ -522,7 +641,7 @@ onMounted(() => {
 
   const temp = localStorage.getItem("resources-type")
   if (temp) {
-    resourcesType.value = JSON.parse(temp).res
+    resourcesType.value = normalizeResourceTypes(JSON.parse(temp).res)
   } else {
     appApi.setType(resourcesType.value)
   }
@@ -581,11 +700,10 @@ onMounted(() => {
           checkQueue()
           // 检查是否有等待提取文案的任务
           if (pendingCaptionExtractions.value.has(res.Id)) {
-            const idx = pendingCaptionExtractions.value.get(res.Id)!
             pendingCaptionExtractions.value.delete(res.Id)
-            const updatedRow = data.value[idx]
-            if (updatedRow && updatedRow.Status === 'done') {
-              doExtractCaption(updatedRow, idx)
+            const idx = data.value.findIndex(item => item.Id === res.Id)
+            if (idx !== -1) {
+              doExtractCaption(data.value[idx], idx)
             }
           }
           break
@@ -649,8 +767,8 @@ const buildClassify = () => {
   // 常用类型排序优先级（越小越靠前）
   const typePriority: { [key: string]: number } = {
     video: 1,
-    audio: 2,
-    m3u8: 3,
+    m3u8: 2,
+    audio: 3,
     live: 4,
     image: 5,
   }
@@ -660,19 +778,13 @@ const buildClassify = () => {
         seen.add(Type)
         return true
       })
-      .map(({Type}) => ({
-        value: Type,
-        label: classifyAlias[Type] ?? Type,
-      }))
+      .map(({Type}) => Type)
       .sort((a, b) => {
-        const pa = typePriority[a.value] ?? 100
-        const pb = typePriority[b.value] ?? 100
+        const pa = typePriority[a] ?? 100
+        const pb = typePriority[b] ?? 100
         return pa - pb
       })
-  classify.value = [
-    {value: "all", label: computed(() => t("index.all"))},
-    ...types,
-  ]
+  classify.value = buildClassifyOptions(types.length > 0 ? types : defaultClassifyTypes)
 }
 
 const dataAction = (row: appType.MediaInfo, index: number, type: string) => {
@@ -842,14 +954,20 @@ const batchExtractCaption = () => {
 }
 
 const batchCancel = async () => {
+  checkedRowKeysValue.value = data.value
+      .filter(item => item.Status === "pending" || item.Status === "running")
+      .map(item => item.Id)
+
   if (checkedRowKeysValue.value.length <= 0) {
     window?.$message?.error(t("index.use_data"))
     return
   }
+
   loading.value = true
+  const cancelKeys = new Set(checkedRowKeysValue.value)
   const cancelTasks: Promise<any>[] = []
-  data.value.forEach((item, index) => {
-    if (!checkedRowKeysValue.value.includes(item.Id)) {
+  data.value.forEach((item) => {
+    if (!cancelKeys.has(item.Id)) {
       return
     }
 
@@ -988,27 +1106,39 @@ const close = () => {
   store.unsetProxy()
 }
 
+const toggleProxy = (checked: boolean) => {
+  if (checked) {
+    open()
+    return
+  }
+  close()
+}
+
+const getClearableRowKeys = () => {
+  return data.value
+      .filter(item => item.Status !== "pending" && item.Status !== "running")
+      .map(item => item.Id)
+}
+
+const selectClearableRows = () => {
+  checkedRowKeysValue.value = getClearableRowKeys()
+}
+
 const clear = async () => {
+  selectClearableRows()
+  const clearKeys = new Set(checkedRowKeysValue.value)
   const newData = [] as any[]
   const signs: string[] = []
-  if (checkedRowKeysValue.value.length > 0) {
-    data.value.forEach((item, index) => {
-      if (checkedRowKeysValue.value.includes(item.Id) && item.Status !== "pending" && item.Status !== "running") {
-        signs.push(item.UrlSign)
-      } else {
-        newData.push(item)
-      }
-    })
-    checkedRowKeysValue.value = []
-  } else {
-    data.value.forEach((item, index) => {
-      if (item.Status === "pending" || item.Status === "running") {
-        newData.push(item)
-      } else {
-        signs.push(item.UrlSign)
-      }
-    })
-  }
+
+  data.value.forEach((item) => {
+    if (clearKeys.has(item.Id) && item.Status !== "pending" && item.Status !== "running") {
+      signs.push(item.UrlSign)
+      return
+    }
+    newData.push(item)
+  })
+
+  checkedRowKeysValue.value = []
   await appApi.delete({sign: signs})
   data.value = newData
   cacheData()
@@ -1094,15 +1224,32 @@ const processOneCaptionTask = async (row: appType.MediaInfo, index: number) => {
       item.Status = 'extract_done'
       const txtPath = res.data?.txt_path || ''
       item.CaptionPath = txtPath
+      if (res.data?.deleted_video) {
+        item.SavePath = ''
+      }
+      const cleanupErrors = res.data?.cleanup_errors || []
       if (txtPath) {
         window?.$message?.success(t("index.extract_caption_saved") + `: ${txtPath}`)
       } else {
         window?.$message?.success(t("index.extract_caption_saved"))
       }
+      if (cleanupErrors.length > 0) {
+        window?.$message?.warning(t("index.extract_caption_cleanup_error", { errors: cleanupErrors.join('; ') }))
+      }
     } else {
       item.Status = 'extract_error'
+      const tempAudioPath = res.data?.temp_audio_path || ''
+      if (tempAudioPath) {
+        item.SavePath = tempAudioPath
+      } else if (res.data?.deleted_video) {
+        item.SavePath = ''
+      }
+      const cleanupErrors = res.data?.cleanup_errors || []
       const errMsg = res.message || t("index.extract_caption_error")
       window?.$message?.error(`${item.Domain || '提取文案'}: ${errMsg}`)
+      if (cleanupErrors.length > 0) {
+        window?.$message?.warning(t("index.extract_caption_cleanup_error", { errors: cleanupErrors.join('; ') }))
+      }
       console.error('提取文案失败:', errMsg)
     }
   } catch (err: any) {
@@ -1126,9 +1273,14 @@ const processCaptionQueue = () => {
 }
 
 const doExtractCaption = (row: appType.MediaInfo, index: number) => {
+  const realIndex = data.value.findIndex(item => item.Id === row.Id)
+  if (realIndex === -1) return
+  const item = data.value[realIndex]
   // 避免重复加入队列
-  if (row.Status === 'extracting') return
-  captionQueue.value.push({ row, index })
+  if (item.Status === 'extracting' || captionQueue.value.some(task => task.row.Id === item.Id)) return
+  item.Status = 'extracting'
+  captionQueue.value.push({ row: item, index: realIndex })
+  cacheData()
   processCaptionQueue()
 }
 

@@ -366,30 +366,52 @@ func (h *HttpServer) extractCaption(w http.ResponseWriter, r *http.Request) {
 
 	// 检查文件是否存在
 	if _, err := os.Stat(videoPath); os.IsNotExist(err) {
-		h.error(w, "视频文件不存在: "+videoPath)
+		h.error(w, "文件不存在: "+videoPath)
 		return
 	}
 
 	// 使用BcutASR提取文案（无需Cookie）
 	asr := NewBcutASR(videoPath)
+	asr.DeleteSourceAfterAudioExtracted = !globalConfig.CaptionKeepVideo
 	text, err := asr.Run()
 	if err != nil {
-		h.error(w, "提取文案失败: "+err.Error())
+		h.error(w, "提取文案失败: "+err.Error(), map[string]interface{}{
+			"deleted_video":   asr.DeletedVideo,
+			"temp_audio_path": asr.TempAudioPath,
+			"cleanup_errors":  asr.CleanupErrors,
+		})
 		return
 	}
 
 	// 保存为txt文件
 	txtFileName := strings.TrimSuffix(filepath.Base(videoPath), filepath.Ext(videoPath)) + "_caption.txt"
 	txtPath := filepath.Join(filepath.Dir(videoPath), txtFileName)
-	
 	if err := SaveASRResultToFile(text, txtPath); err != nil {
-		h.error(w, "保存文案失败: "+err.Error())
+		h.error(w, "保存文案失败: "+err.Error(), map[string]interface{}{
+			"deleted_video":   asr.DeletedVideo,
+			"temp_audio_path": asr.TempAudioPath,
+			"cleanup_errors":  asr.CleanupErrors,
+		})
 		return
 	}
 
+	cleanupErrors := append([]string{}, asr.CleanupErrors...)
+	deletedAudio := false
+	deletedVideo := asr.DeletedVideo
+	if !globalConfig.CaptionKeepAudio && asr.TempAudioPath != "" {
+		if err := os.Remove(asr.TempAudioPath); err != nil && !os.IsNotExist(err) {
+			cleanupErrors = append(cleanupErrors, "删除音频失败: "+err.Error())
+		} else {
+			deletedAudio = true
+		}
+	}
+
 	h.success(w, map[string]interface{}{
-		"text":     text,
-		"txt_path": txtPath,
+		"text":           text,
+		"txt_path":       txtPath,
+		"deleted_audio":  deletedAudio,
+		"deleted_video":  deletedVideo,
+		"cleanup_errors": cleanupErrors,
 	})
 }
 
