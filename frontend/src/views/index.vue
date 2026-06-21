@@ -14,7 +14,7 @@
           <span v-if="data.length > 0" class="rounded-full bg-gray-100 px-2 py-0.5 text-xs font-semibold text-gray-600">{{ data.length }}</span>
         </div>
 
-        <div class="flex min-w-0 flex-[0_1_auto] flex-wrap items-center gap-x-3 gap-y-2">
+        <div class="inline-flex min-h-10 shrink-0 flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-gray-200 bg-gray-50/70 px-3 py-1">
           <span class="mr-1 whitespace-nowrap text-sm text-gray-500">{{ t('index.grab_type') }}</span>
           <NCheckbox
               v-for="item in visibleClassify"
@@ -43,15 +43,15 @@
           </NPopover>
         </div>
 
-        <div class="ml-auto flex min-w-[360px] flex-[1_1_360px] items-center gap-1">
+        <div class="ml-auto flex min-h-10 min-w-[420px] flex-[1_1_480px] items-center gap-2 rounded-md border border-gray-200 bg-gray-50/70 px-3 py-1">
           <span class="whitespace-nowrap text-sm text-gray-500">{{ t('setting.save_dir') }}</span>
           <div
-              class="flex h-8 min-w-0 flex-1 items-center rounded border border-gray-200 bg-white px-2 text-sm text-gray-800"
+              class="flex min-h-8 min-w-0 flex-1 items-start rounded border border-gray-200 bg-white px-2 py-1 text-xs leading-4 text-gray-800"
               :title="store.globalConfig.SaveDirectory"
           >
             <span
                 v-if="store.globalConfig.SaveDirectory"
-                class="block min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-left [direction:rtl] [unicode-bidi:plaintext]"
+                class="block min-w-0 flex-1 whitespace-normal break-all text-left"
             >{{ store.globalConfig.SaveDirectory }}</span>
             <span v-else class="text-gray-400">{{ t('index.save_path_empty') }}</span>
           </div>
